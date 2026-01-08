@@ -113,6 +113,7 @@ type StreamUrlInfo struct {
 	Description          string
 	Resolution           int
 	Vbitrate             int
+	Extension            string
 	HeadersForDownloader map[string]string
 }
 

@@ -140,8 +140,12 @@ func (l *Live) GetStreamInfos() (infos []*live.StreamUrlInfo, err error) {
 	for _, item := range cookies {
 		cookieKVs[item.Name] = item.Value
 	}
+	qn := l.Options.Quality
+	if qn == 0 {
+		qn = 30000 // 默认尝试请求杜比视界，API 会根据权限自动降级
+	}
 	apiUrl := liveApiUrlv2
-	query := fmt.Sprintf("?room_id=%s&protocol=0,1&format=0,1,2&codec=0,1&qn=10000&platform=web&ptype=8&dolby=5&panorama=1", l.realID)
+	query := fmt.Sprintf("?room_id=%s&protocol=0,1&format=0,1,2&codec=0,1&qn=%d&platform=web&ptype=8&dolby=5&panorama=1", l.realID, qn)
 	agent := live.CommonUserAgent
 	// for audio only use android api
 	if l.Options.AudioOnly {
@@ -180,11 +184,29 @@ func (l *Live) GetStreamInfos() (infos []*live.StreamUrlInfo, err error) {
 	urlStrings := make([]string, 0, 4)
 	addr := ""
 
-	if l.Options.Quality == 0 && gjson.GetBytes(body, "data.playurl_info.playurl.stream.1.format.1.codec.#").Int() > 1 {
-		addr = "data.playurl_info.playurl.stream.1.format.1.codec.1" // hevc m3u8
-	} else {
-		addr = "data.playurl_info.playurl.stream.0.format.0.codec.0" // avc flv
-	}
+	// 选取最高画质的流地址
+	maxQN := int64(0)
+	bestStreamPath := "data.playurl_info.playurl.stream.0.format.0.codec.0"
+
+	gjson.GetBytes(body, "data.playurl_info.playurl.stream").ForEach(func(sIdx, stream gjson.Result) bool {
+		protocolName := stream.Get("protocol_name").String()
+		stream.Get("format").ForEach(func(fIdx, format gjson.Result) bool {
+			format.Get("codec").ForEach(func(cIdx, codec gjson.Result) bool {
+				currentQN := codec.Get("current_qn").Int()
+				// 优先级策略：
+				// 1. 谁的 QN 大选谁
+				// 2. 如果 QN 相同，优先选 http_hls (HLS)
+				if currentQN > maxQN || (currentQN == maxQN && protocolName == "http_hls") {
+					maxQN = currentQN
+					bestStreamPath = fmt.Sprintf("data.playurl_info.playurl.stream.%d.format.%d.codec.%d", sIdx.Int(), fIdx.Int(), cIdx.Int())
+				}
+				return true
+			})
+			return true
+		})
+		return true
+	})
+	addr = bestStreamPath
 
 	baseURL := gjson.GetBytes(body, addr+".base_url").String()
 	gjson.GetBytes(body, addr+".url_info").ForEach(func(_, value gjson.Result) bool {
@@ -194,11 +216,30 @@ func (l *Live) GetStreamInfos() (infos []*live.StreamUrlInfo, err error) {
 		return true
 	})
 
+	ext := ".flv"
+	addrParts := strings.Split(addr, ".")
+	if len(addrParts) >= 7 {
+		formatPath := strings.Join(addrParts[:7], ".")
+		formatName := gjson.GetBytes(body, formatPath+".format_name").String()
+		switch formatName {
+		case "ts":
+			ext = ".ts"
+		case "fmp4":
+			ext = ".mp4"
+		}
+	}
+
 	urls, err := utils.GenUrls(urlStrings...)
 	if err != nil {
 		return nil, err
 	}
-	infos = utils.GenUrlInfos(urls, l.getHeadersForDownloader())
+	for _, u := range urls {
+		infos = append(infos, &live.StreamUrlInfo{
+			Url:                  u,
+			Extension:            ext,
+			HeadersForDownloader: l.getHeadersForDownloader(),
+		})
+	}
 	return
 }
 

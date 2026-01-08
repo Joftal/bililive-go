@@ -134,7 +134,16 @@ class ConfigInfo extends React.Component<Props, IState> {
           <div className="help-item-details">
             <div><code>url</code>: 直播间完整链接。</div>
             <div><code>is_listening</code>: 是否启用监控。</div>
-            <div><code>quality</code>: 录制画质（B站 0 为原画 PRO/HEVC）。</div>
+            <div><code>quality</code>: 录制画质。B站 quality 参数说明：
+              <ul style={{ paddingLeft: 16, marginTop: 4, marginBottom: 4, fontSize: '11px', color: '#666' }}>
+                <li><b>0</b>: 默认建议。自动请求最高画质（杜比视界/4K/原画）。</li>
+                <li><b>30000</b>: 杜比视界（需大会员）。</li>
+                <li><b>20000</b>: 4K (需大会员)。</li>
+                <li><b>10000</b>: 1080P/原画。</li>
+                <li><b>250</b>: 720P/超清。</li>
+                <li><b>80</b>: 360P/流畅。</li>
+              </ul>
+            </div>
             <div><code>audio_only</code>: 是否仅录制音频。</div>
             <div><code>nick_name</code>: 别名，用于显示和文件名。</div>
           </div>

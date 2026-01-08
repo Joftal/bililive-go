@@ -138,12 +138,26 @@ func (r *recorder) tryRecord(ctx context.Context) {
 	streamInfo := streamInfos[0]
 	url := streamInfo.Url
 
-	if strings.Contains(url.Path, "m3u8") {
-		fileName = fileName[:len(fileName)-4] + ".ts"
+	if streamInfo.Extension != "" {
+		if strings.HasSuffix(fileName, ".flv") {
+			fileName = fileName[:len(fileName)-4] + streamInfo.Extension
+		} else if lastDot := strings.LastIndex(fileName, "."); lastDot != -1 {
+			fileName = fileName[:lastDot] + streamInfo.Extension
+		} else {
+			fileName = fileName + streamInfo.Extension
+		}
+	} else if strings.Contains(url.Path, "m3u8") {
+		if strings.HasSuffix(fileName, ".flv") {
+			fileName = fileName[:len(fileName)-4] + ".ts"
+		}
 	}
 
 	if info.AudioOnly {
-		fileName = fileName[:strings.LastIndex(fileName, ".")] + ".aac"
+		if lastDot := strings.LastIndex(fileName, "."); lastDot != -1 {
+			fileName = fileName[:lastDot] + ".aac"
+		} else {
+			fileName = fileName + ".aac"
+		}
 	}
 
 	if err = mkdir(outputPath); err != nil {
