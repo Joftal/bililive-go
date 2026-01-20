@@ -1618,29 +1618,42 @@ func updateRoomConfig(writer http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// getSafePath 验证并生成安全的绝对路径，防止路径遍历（Path Traversal）攻击。
+// base: 授权访问的基础根目录。
+// subPath: 待访问的相对子路径。
+// 该函数会通过计算绝对路径并检查相对关系，确保最终路径不会逃逸出基础根目录。
+func getSafePath(base, subPath string) (string, error) {
+	absBase, err := filepath.Abs(base)
+	if err != nil {
+		return "", err
+	}
+	absTarget, err := filepath.Abs(filepath.Join(absBase, subPath))
+	if err != nil {
+		return "", err
+	}
+
+	rel, err := filepath.Rel(absBase, absTarget)
+	if err != nil {
+		return "", err
+	}
+
+	// 核心安全逻辑：如果计算出的相对路径以 ".." 开头，说明它逃逸到了 base 目录之外
+	if strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return "", errors.New("非法路径访问：超出授权范围")
+	}
+
+	return absTarget, nil
+}
+
 func getFileInfo(writer http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	path := vars["path"]
 
 	cfg := configs.GetCurrentConfig()
-	base, err := filepath.Abs(cfg.OutPutPath)
+	absPath, err := getSafePath(cfg.OutPutPath, path)
 	if err != nil {
 		writeJSON(writer, commonResp{
-			ErrMsg: "无效输出目录",
-		})
-		return
-	}
-
-	absPath, err := filepath.Abs(filepath.Join(base, path))
-	if err != nil {
-		writeJSON(writer, commonResp{
-			ErrMsg: "无效路径",
-		})
-		return
-	}
-	if !strings.HasPrefix(absPath, base) {
-		writeJSON(writer, commonResp{
-			ErrMsg: "异常路径",
+			ErrMsg: "无效或越权路径",
 		})
 		return
 	}
@@ -1732,10 +1745,9 @@ func renameFile(writer http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := configs.GetCurrentConfig()
-	base, _ := filepath.Abs(cfg.OutPutPath)
-	oldAbsPath, err := filepath.Abs(filepath.Join(base, path))
-	if err != nil || !strings.HasPrefix(oldAbsPath, base) {
-		writeJSON(writer, commonResp{ErrNo: 400, ErrMsg: "无效路径"})
+	oldAbsPath, err := getSafePath(cfg.OutPutPath, path)
+	if err != nil {
+		writeJSON(writer, commonResp{ErrNo: 400, ErrMsg: "无效或越权路径"})
 		return
 	}
 
@@ -1746,11 +1758,24 @@ func renameFile(writer http.ResponseWriter, r *http.Request) {
 	}
 
 	var newAbsPath string
+	baseDir := filepath.Dir(oldAbsPath)
 	if info.IsDir() {
-		newAbsPath = filepath.Join(filepath.Dir(oldAbsPath), body.NewName)
+		newAbsPath = filepath.Join(baseDir, body.NewName)
 	} else {
 		ext := filepath.Ext(oldAbsPath)
-		newAbsPath = filepath.Join(filepath.Dir(oldAbsPath), body.NewName+ext)
+		newAbsPath = filepath.Join(baseDir, body.NewName+ext)
+	}
+
+	// 重点：必须再次校验新路径是否安全，防止 body.NewName 包含 ../ 等逃逸字符
+	base, err := filepath.Abs(cfg.OutPutPath)
+	if err != nil {
+		writeJSON(writer, commonResp{ErrNo: 500, ErrMsg: "获取根目录绝对路径失败: " + err.Error()})
+		return
+	}
+	rel, err := filepath.Rel(base, newAbsPath)
+	if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		writeJSON(writer, commonResp{ErrNo: 400, ErrMsg: "非法的新文件名：禁止越界路径"})
+		return
 	}
 
 	// 检查目标文件名是否已存在
@@ -1772,10 +1797,14 @@ func deleteFile(writer http.ResponseWriter, r *http.Request) {
 	path := vars["path"]
 
 	cfg := configs.GetCurrentConfig()
-	base, _ := filepath.Abs(cfg.OutPutPath)
-	absPath, err := filepath.Abs(filepath.Join(base, path))
-	if err != nil || !strings.HasPrefix(absPath, base) || absPath == base {
-		writeJSON(writer, commonResp{ErrNo: 400, ErrMsg: "禁止删除根目录或无效路径"})
+	base, err := filepath.Abs(cfg.OutPutPath)
+	if err != nil {
+		writeJSON(writer, commonResp{ErrNo: 500, ErrMsg: "获取根目录绝对路径失败: " + err.Error()})
+		return
+	}
+	absPath, err := getSafePath(cfg.OutPutPath, path)
+	if err != nil || absPath == base {
+		writeJSON(writer, commonResp{ErrNo: 400, ErrMsg: "禁止删除根目录或无效/越权路径"})
 		return
 	}
 
@@ -1799,7 +1828,11 @@ func batchRenameFiles(writer http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := configs.GetCurrentConfig()
-	base, _ := filepath.Abs(cfg.OutPutPath)
+	base, err := filepath.Abs(cfg.OutPutPath)
+	if err != nil {
+		writeJSON(writer, commonResp{ErrNo: 500, ErrMsg: "获取根目录绝对路径失败: " + err.Error()})
+		return
+	}
 
 	type Result struct {
 		Path    string `json:"path"`
@@ -1809,9 +1842,9 @@ func batchRenameFiles(writer http.ResponseWriter, r *http.Request) {
 	results := make([]Result, 0, len(body.Paths))
 
 	for _, path := range body.Paths {
-		oldAbsPath, err := filepath.Abs(filepath.Join(base, path))
-		if err != nil || !strings.HasPrefix(oldAbsPath, base) {
-			results = append(results, Result{Path: path, Success: false, Message: "无效路径"})
+		oldAbsPath, err := getSafePath(cfg.OutPutPath, path)
+		if err != nil {
+			results = append(results, Result{Path: path, Success: false, Message: "无效或越权路径"})
 			continue
 		}
 
@@ -1839,6 +1872,13 @@ func batchRenameFiles(writer http.ResponseWriter, r *http.Request) {
 
 		newAbsPath := filepath.Join(filepath.Dir(oldAbsPath), newName)
 
+		// 二次校验新路径
+		rel, err := filepath.Rel(base, newAbsPath)
+		if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+			results = append(results, Result{Path: path, Success: false, Message: "目标名越界"})
+			continue
+		}
+
 		// 检查目标文件名是否已存在
 		if _, err := os.Stat(newAbsPath); err == nil {
 			results = append(results, Result{Path: path, Success: false, Message: "目标已存在"})
@@ -1865,7 +1905,11 @@ func batchDeleteFiles(writer http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := configs.GetCurrentConfig()
-	base, _ := filepath.Abs(cfg.OutPutPath)
+	base, err := filepath.Abs(cfg.OutPutPath)
+	if err != nil {
+		writeJSON(writer, commonResp{ErrNo: 500, ErrMsg: "获取根目录绝对路径失败: " + err.Error()})
+		return
+	}
 
 	type Result struct {
 		Path    string `json:"path"`
@@ -1875,9 +1919,9 @@ func batchDeleteFiles(writer http.ResponseWriter, r *http.Request) {
 	results := make([]Result, 0, len(body.Paths))
 
 	for _, path := range body.Paths {
-		absPath, err := filepath.Abs(filepath.Join(base, path))
-		if err != nil || !strings.HasPrefix(absPath, base) || absPath == base {
-			results = append(results, Result{Path: path, Success: false, Message: "无效路径"})
+		absPath, err := getSafePath(cfg.OutPutPath, path)
+		if err != nil || absPath == base {
+			results = append(results, Result{Path: path, Success: false, Message: "禁止操作根目录或越权路径"})
 			continue
 		}
 
@@ -2428,23 +2472,34 @@ func pollBilibiliQRCode(writer http.ResponseWriter, r *http.Request) {
 		} `json:"data"`
 	}
 
-	if err := json.Unmarshal(body, &result); err == nil && result.Code == 0 && result.Data.Code == 0 && result.Data.Url != "" {
+	if err := json.Unmarshal(body, &result); err != nil {
+		applog.GetLogger().Error("轮询登录状态解析 JSON 失败: " + err.Error())
+	} else if result.Code == 0 && result.Data.Code == 0 && result.Data.Url != "" {
 		// 登录成功，检查响应头中的 Cookie
-		u, _ := url.Parse(result.Data.Url)
-		q := u.Query()
-		foundExtra := false
-		if resp.Response != nil {
-			for _, cookie := range resp.Response.Cookies() {
-				if cookie.Name == "sid" && q.Get("sid") == "" {
-					q.Set("sid", cookie.Value)
-					foundExtra = true
+		u, err := url.Parse(result.Data.Url)
+		if err != nil {
+			applog.GetLogger().Error("解析登录回调 URL 失败: " + err.Error() + ", URL: " + result.Data.Url)
+		} else {
+			q := u.Query()
+			foundExtra := false
+			if resp.Response != nil {
+				for _, cookie := range resp.Response.Cookies() {
+					if cookie.Name == "sid" && q.Get("sid") == "" {
+						q.Set("sid", cookie.Value)
+						foundExtra = true
+					}
 				}
 			}
-		}
-		if foundExtra {
-			u.RawQuery = q.Encode()
-			result.Data.Url = u.String()
-			body, _ = json.Marshal(result)
+			if foundExtra {
+				u.RawQuery = q.Encode()
+				result.Data.Url = u.String()
+				newBody, err := json.Marshal(result)
+				if err != nil {
+					applog.GetLogger().Error("序列化增强后的登录结果失败: " + err.Error())
+				} else {
+					body = newBody
+				}
+			}
 		}
 	}
 

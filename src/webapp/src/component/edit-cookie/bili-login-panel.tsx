@@ -20,14 +20,23 @@ const BiliLoginPanel: React.FC<BiliLoginPanelProps> = ({ initialCookie, onCookie
     const [verificationInfo, setVerificationInfo] = useState<any>(null);
 
     const pollTimerRef = useRef<any>(null);
+    const hasAutoVerified = useRef(false);
+    const isMounted = useRef(true);
+    const textViewRef = useRef(textView);
+    const onCookieChangeRef = useRef(onCookieChange);
 
-    const verifyCookie = useCallback((cookie: string) => {
-        const target = cookie || textView;
+    // Keep refs updated for stable callbacks
+    textViewRef.current = textView;
+    onCookieChangeRef.current = onCookieChange;
+
+    const verifyCookie = useCallback((cookie?: string) => {
+        const target = cookie || textViewRef.current;
         if (!target) return;
         setVerifying(true);
         setVerificationInfo(null);
         api.verifyBilibiliCookie(target)
             .then((rsp: any) => {
+                if (!isMounted.current) return;
                 setVerifying(false);
                 if (rsp.code === 0 && rsp.data && rsp.data.isLogin) {
                     setVerificationInfo({
@@ -39,8 +48,11 @@ const BiliLoginPanel: React.FC<BiliLoginPanelProps> = ({ initialCookie, onCookie
                     notification.warning({ message: 'Cookie 可能无效或已过期' });
                 }
             })
-            .catch(() => setVerifying(false));
-    }, [api, textView]);
+            .catch(() => {
+                if (!isMounted.current) return;
+                setVerifying(false);
+            });
+    }, [api]);
 
     const processLoginSuccess = useCallback((urlStr: string) => {
         try {
@@ -56,19 +68,21 @@ const BiliLoginPanel: React.FC<BiliLoginPanelProps> = ({ initialCookie, onCookie
             // Filter out null values and join
             const cookieStr = cookies.filter(c => !c.includes('null')).join('; ') + ';';
             setTextView(cookieStr);
-            onCookieChange(cookieStr);
+            onCookieChangeRef.current(cookieStr);
             // Auto verify after success
             verifyCookie(cookieStr);
         } catch (e) {
+            console.error(e);
             notification.error({ message: '解析结果失败' });
         }
-    }, [onCookieChange, verifyCookie]);
+    }, [verifyCookie]);
 
     const startPolling = useCallback((key: string) => {
         if (pollTimerRef.current) clearInterval(pollTimerRef.current);
         pollTimerRef.current = setInterval(() => {
             api.pollBilibiliQRCode(key)
                 .then((res: any) => {
+                    if (!isMounted.current) return;
                     if (res.code === 0) {
                         const data = res.data;
                         if (data.code === 0) {
@@ -84,7 +98,7 @@ const BiliLoginPanel: React.FC<BiliLoginPanelProps> = ({ initialCookie, onCookie
                             setLoginMsg('请在手机上确认登录');
                         } else if (data.code === 86038) {
                             setLoginStatus('expired');
-                            setLoginMsg('二维码已过期');
+                            setLoginMsg('二维码已过期，请关闭当前界面并重新打开以获取新二维码');
                             clearInterval(pollTimerRef.current);
                         }
                     }
@@ -98,6 +112,7 @@ const BiliLoginPanel: React.FC<BiliLoginPanelProps> = ({ initialCookie, onCookie
         setLoginMsg('正在获取二维码...');
         api.getBilibiliQRCode()
             .then((res: any) => {
+                if (!isMounted.current) return;
                 if (res.code === 0) {
                     setQrCodeUrl(res.data.url);
                     setLoginStatus('active');
@@ -109,6 +124,7 @@ const BiliLoginPanel: React.FC<BiliLoginPanelProps> = ({ initialCookie, onCookie
                 }
             })
             .catch(err => {
+                if (!isMounted.current) return;
                 setLoginStatus('expired');
                 setLoginMsg('获取连接失败');
                 console.error(err);
@@ -122,15 +138,21 @@ const BiliLoginPanel: React.FC<BiliLoginPanelProps> = ({ initialCookie, onCookie
     };
 
     useEffect(() => {
+        isMounted.current = true;
         getBiliQRCode();
-        // 如果初始有 Cookie，自动触发一次验证
-        if (initialCookie) {
-            verifyCookie(initialCookie);
-        }
         return () => {
+            isMounted.current = false;
             if (pollTimerRef.current) clearInterval(pollTimerRef.current);
         };
-    }, [getBiliQRCode, initialCookie, verifyCookie]);
+    }, [getBiliQRCode]);
+
+    // 仅在打开界面且初始有 Cookie 时自动验证一次
+    useEffect(() => {
+        if (initialCookie && !hasAutoVerified.current) {
+            verifyCookie(initialCookie);
+            hasAutoVerified.current = true;
+        }
+    }, [initialCookie, verifyCookie]);
 
     return (
         <div className="bili-login-container">
@@ -160,12 +182,12 @@ const BiliLoginPanel: React.FC<BiliLoginPanelProps> = ({ initialCookie, onCookie
                                         <div className="qr-status-text">
                                             {loginStatus === 'scanned' && '已扫描，待确认'}
                                             {loginStatus === 'success' && '登录成功'}
-                                            {loginStatus === 'expired' && '超时已过期'}
+                                            {loginStatus === 'expired' && '二维码已过期'}
                                         </div>
                                         {loginStatus === 'expired' && (
-                                            <Button size="middle" type="primary" onClick={getBiliQRCode} style={{ marginTop: 8 }}>
-                                                刷新二维码
-                                            </Button>
+                                            <div style={{ color: '#fff', fontSize: '12px', marginTop: 10, padding: '0 10px', textAlign: 'center' }}>
+                                                请关闭管理界面并重新打开以刷新二维码
+                                            </div>
                                         )}
                                     </div>
                                 )}
@@ -193,11 +215,12 @@ const BiliLoginPanel: React.FC<BiliLoginPanelProps> = ({ initialCookie, onCookie
                     </div>
                     <TextArea
                         className="cookie-textarea"
-                        placeholder="在此粘贴或修改 Cookie 字符串..."
+                        placeholder="在此粘贴或修改 Cookie 字符串... (手动修改后请点击上方按钮验证)"
                         value={textView}
                         autoSize={{ minRows: 6, maxRows: 6 }}
                         onChange={handleTextChange}
                     />
+                    <div className="manual-tip">提示：输入或粘贴 Cookie 后，请手动点击右上方“重新验证”按钮确认有效性</div>
 
                     {verificationInfo ? (
                         <div className="verification-card">
@@ -241,7 +264,7 @@ const BiliLoginPanel: React.FC<BiliLoginPanelProps> = ({ initialCookie, onCookie
                     <div style={{ fontSize: '14px' }}>
                         推荐使用扫码登录，如录制画质受限（4K）-触发风控-弹幕获取失败等。请手动获取 Cookie，步骤如下：
                         <ul className="instruction-list">
-                            <li>在浏览器打开 <b>live.bilibili.com</b> 并保持登录状态。</li>
+                            <li>在浏览器打开 <b>哔哩哔哩</b> 并保持登录状态。</li>
                             <li>按键盘上的 <b>F12</b> 或右键选择 <b>检查</b>，切换到 <b>网络 (Network)</b> 面板。</li>
                             <li>刷新页面，点开列表中的 <b>www.bilibili.com</b> 第一个请求，在 <b>标头 (Headers)</b> 中找到 <b>Cookie</b> 一栏。</li>
                             <li><b>右键选中复制值</b>，并粘贴到上方输入框内。</li>

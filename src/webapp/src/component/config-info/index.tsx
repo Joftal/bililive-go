@@ -352,10 +352,12 @@ const GlobalSettings: React.FC<{
       await onUpdate(updates);
       message.success('设置已保存');
     } catch (error: any) {
+      console.error('保存全局设置失败:', error);
       if (error?.errorFields) {
         message.error('表单校验失败，请检查输入项');
       } else {
-        message.error('保存失败: ' + (error?.err_msg || error?.message || '未知错误'));
+        const errorMsg = error?.err_msg || error?.message || '未知错误';
+        message.error('保存失败: ' + errorMsg);
       }
     }
   };
@@ -658,8 +660,10 @@ const NotifySettings: React.FC<{
       };
       await onUpdate(updates);
       message.success('通知设置已保存');
-    } catch (error) {
-      message.error('保存失败');
+    } catch (error: any) {
+      console.error('保存通知设置失败:', error);
+      const errorMsg = error?.err_msg || error?.message || '未知错误';
+      message.error('保存失败: ' + errorMsg);
     }
   };
 
@@ -796,8 +800,10 @@ const PlatformSettings: React.FC<{
     try {
       await onUpdate(platformKey, values);
       message.success('平台设置已保存');
-    } catch (error) {
-      message.error('保存失败');
+    } catch (error: any) {
+      console.error(`保存平台设置 (${platformKey}) 失败:`, error);
+      const errorMsg = error?.err_msg || error?.message || '未知错误';
+      message.error('保存失败: ' + errorMsg);
     }
   };
 
@@ -821,8 +827,10 @@ const PlatformSettings: React.FC<{
       setSelectedNewPlatform('');
       onRefresh();
       message.success('平台配置已添加');
-    } catch (error) {
-      message.error('添加失败');
+    } catch (error: any) {
+      console.error('添加平台配置失败:', error);
+      const errorMsg = error?.err_msg || error?.message || '未知错误';
+      message.error('添加失败: ' + errorMsg);
     }
   };
 
@@ -871,7 +879,7 @@ const PlatformSettings: React.FC<{
               {platform.listening_count > 0 && (
                 // @ts-ignore
                 <Badge
-                  count={platform.room_count}
+                  count={platform.listening_count}
                   showZero
                   style={{ backgroundColor: '#f0f0f0', color: 'rgba(0,0,0,0.45)', boxShadow: '0 0 0 1px #d9d9d9 inset' }}
                 >
@@ -1008,6 +1016,7 @@ const PlatformConfigForm: React.FC<{
         >
           <Form.Item name="interval" rules={[{ type: 'number', min: 1, message: '必须大于 0' }]}>
             <InputNumber
+              min={1}
               placeholder={`继承全局: ${globalInterval}`}
               style={{ width: 200 }}
             />
@@ -1228,10 +1237,12 @@ export const RoomConfigForm: React.FC<{
       message.success('直播间配置已更新');
       if (onRefresh) onRefresh();
     } catch (error: any) {
+      console.error('保存直播间配置失败:', error);
       if (error?.errorFields) {
         message.error('表单校验失败，请检查输入项');
       } else {
-        message.error('保存失败: ' + (error?.message || '未知错误'));
+        const errorMsg = error?.err_msg || error?.message || '未知错误';
+        message.error('保存失败: ' + errorMsg);
       }
     }
   };
@@ -1297,7 +1308,7 @@ export const RoomConfigForm: React.FC<{
         }}
         id={`rooms-live-${room.live_id}-interval`}
       >
-        <Form.Item name="interval" rules={[{ type: 'number', min: 1, message: '必须大于 0' }]}>
+        <Form.Item name="interval" rules={[{ type: 'number', min: 0, message: '不能为负数' }]}>
           <InputNumber
             min={0}
             style={{ width: 200 }}
