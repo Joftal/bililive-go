@@ -236,6 +236,7 @@ func main() {
 	// 这样可以通过取消根 context 来优雅地关闭所有 goroutine
 	rootCtx, rootCancel := context.WithCancel(context.Background())
 	ctx := context.WithValue(rootCtx, instance.Key, inst)
+	inst.Ctx = ctx
 
 	logger := log.New(ctx)
 	logger.Infof("%s Version: %s Link Start", consts.AppName, consts.AppVersion)

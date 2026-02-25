@@ -423,7 +423,7 @@ func parseLiveAction(writer http.ResponseWriter, r *http.Request) {
 	}
 	switch vars["action"] {
 	case "start":
-		if err := startListening(r.Context(), live); err != nil {
+		if err := startListening(inst.Ctx, live); err != nil {
 			resp.ErrNo = http.StatusBadRequest
 			resp.ErrMsg = err.Error()
 			writeJsonWithStatusCode(writer, http.StatusBadRequest, resp)
@@ -437,7 +437,7 @@ func parseLiveAction(writer http.ResponseWriter, r *http.Request) {
 			"live_id": string(live.GetLiveId()),
 		})
 	case "stop":
-		if err := stopListening(r.Context(), live.GetLiveId()); err != nil {
+		if err := stopListening(inst.Ctx, live.GetLiveId()); err != nil {
 			resp.ErrNo = http.StatusBadRequest
 			resp.ErrMsg = err.Error()
 			writeJsonWithStatusCode(writer, http.StatusBadRequest, resp)
@@ -604,9 +604,9 @@ func switchStreamHandler(writer http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if recorderMgr.HasRecorder(r.Context(), live.GetLiveId()) {
+	if recorderMgr.HasRecorder(inst.Ctx, live.GetLiveId()) {
 		// 重启录制器以应用新的流设置
-		if err := recorderMgr.RestartRecorder(r.Context(), live); err != nil {
+		if err := recorderMgr.RestartRecorder(inst.Ctx, live); err != nil {
 			resp.ErrNo = http.StatusInternalServerError
 			resp.ErrMsg = "重启录制器失败: " + err.Error()
 			writeJsonWithStatusCode(writer, http.StatusInternalServerError, resp)
@@ -665,6 +665,7 @@ func stopListening(ctx context.Context, liveId types.LiveID) error {
 ]
 */
 func addLives(writer http.ResponseWriter, r *http.Request) {
+	inst := instance.GetInstance(r.Context())
 	b, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeJSON(writer, map[string]any{
@@ -677,7 +678,7 @@ func addLives(writer http.ResponseWriter, r *http.Request) {
 	gjson.ParseBytes(b).ForEach(func(key, value gjson.Result) bool {
 		isListen := value.Get("listen").Bool()
 		urlStr := strings.Trim(value.Get("url").String(), " ")
-		if retInfo, err := addLiveImpl(r.Context(), urlStr, isListen); err != nil {
+		if retInfo, err := addLiveImpl(inst.Ctx, urlStr, isListen); err != nil {
 			msg := urlStr + ": " + err.Error()
 			applog.GetLogger().Error(msg)
 			errorMessages = append(errorMessages, msg)
@@ -752,7 +753,7 @@ func removeLive(writer http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if err := removeLiveImpl(r.Context(), live); err != nil {
+	if err := removeLiveImpl(inst.Ctx, live); err != nil {
 		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{
 			ErrNo:  http.StatusBadRequest,
 			ErrMsg: err.Error(),
@@ -818,6 +819,7 @@ func getRawConfig(writer http.ResponseWriter, r *http.Request) {
 }
 
 func putRawConfig(writer http.ResponseWriter, r *http.Request) {
+	inst := instance.GetInstance(r.Context())
 	b, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{
@@ -826,7 +828,7 @@ func putRawConfig(writer http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	ctx := r.Context()
+	ctx := inst.Ctx
 	var jsonBody map[string]any
 	json.Unmarshal(b, &jsonBody)
 	newConfig, err := configs.NewConfigWithBytes([]byte(jsonBody["config"].(string)))
