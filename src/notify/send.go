@@ -195,24 +195,44 @@ func formatFileSize(size int64) string {
 }
 
 // buildRecordingSummaryMessage 构造录制摘要消息内容
-func buildRecordingSummaryMessage(hostName, platform string, files []RecordingFileDetail) (title, body string) {
+// 当文件数量过多时，截断文件列表以避免超出消息平台字符限制（如 Telegram 4096 字符）
+// outputPath 用于获取剩余磁盘空间，为空则不显示
+func buildRecordingSummaryMessage(hostName, platform string, files []RecordingFileDetail, outputPath string) (title, body string) {
+	const maxDisplayFiles = 30 // 最多显示的文件数量
+
 	title = fmt.Sprintf("%s 录制完成", hostName)
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("平台：%s\n", platform))
 	sb.WriteString(fmt.Sprintf("录制文件：%d 个\n", len(files)))
 	var totalSize int64
-	for i, f := range files {
-		sb.WriteString(fmt.Sprintf("  %d. %s (%s)\n", i+1, f.Name, formatFileSize(f.Size)))
+	displayCount := len(files)
+	if displayCount > maxDisplayFiles {
+		displayCount = maxDisplayFiles
+	}
+	for i := 0; i < displayCount; i++ {
+		sb.WriteString(fmt.Sprintf("  %d. %s (%s)\n", i+1, files[i].Name, formatFileSize(files[i].Size)))
+	}
+	for _, f := range files {
 		totalSize += f.Size
 	}
+	if len(files) > maxDisplayFiles {
+		sb.WriteString(fmt.Sprintf("  ... 还有 %d 个文件未显示\n", len(files)-maxDisplayFiles))
+	}
 	sb.WriteString(fmt.Sprintf("总大小：%s", formatFileSize(totalSize)))
+	// 显示剩余磁盘空间
+	if outputPath != "" {
+		if free, err := getDiskFreeSpace(outputPath); err == nil {
+			sb.WriteString(fmt.Sprintf("\n剩余磁盘空间：%s", formatFileSize(int64(free))))
+		}
+	}
 	body = sb.String()
 	return
 }
 
 // SendRecordingSummary 录制结束后发送录制文件摘要通知
-func SendRecordingSummary(logger *livelogger.LiveLogger, hostName, platform string, files []RecordingFileDetail) {
+// outputPath 为录制输出路径，用于获取剩余磁盘空间
+func SendRecordingSummary(logger *livelogger.LiveLogger, hostName, platform string, files []RecordingFileDetail, outputPath string) {
 	cfg := configs.GetCurrentConfig()
 	if cfg == nil || !cfg.Notify.SendRecordingSummary {
 		return
@@ -221,7 +241,7 @@ func SendRecordingSummary(logger *livelogger.LiveLogger, hostName, platform stri
 		return
 	}
 
-	title, body := buildRecordingSummaryMessage(hostName, platform, files)
+	title, body := buildRecordingSummaryMessage(hostName, platform, files, outputPath)
 
 	// Telegram
 	if cfg.Notify.Telegram.Enable {

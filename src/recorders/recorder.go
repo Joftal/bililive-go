@@ -215,6 +215,9 @@ type recorder struct {
 
 	// 实际流头部信息（来自 StreamProbe 探测）
 	actualStreamInfo atomic.Pointer[streamprobe.StreamHeaderInfo]
+
+	// 累积的录制文件信息，待录制结束后统一推送摘要
+	recordedFiles []notify.RecordingFileDetail
 }
 
 func NewRecorder(ctx context.Context, live live.Live) (Recorder, error) {
@@ -446,12 +449,8 @@ func (r *recorder) tryRecord(ctx context.Context) {
 	// 使用层级配置的 OnRecordFinished
 	cmdStr := strings.Trim(resolvedConfig.OnRecordFinished.CustomCommandline, "")
 	if len(cmdStr) > 0 {
-		// 发送录制文件摘要通知（legacy 路径，单文件）
-		if fi, statErr := os.Stat(fileName); statErr == nil {
-			notify.SendRecordingSummary(r.getLogger(), info.HostName, r.Live.GetPlatformCNName(), []notify.RecordingFileDetail{
-				{Name: filepath.Base(fileName), Size: fi.Size()},
-			})
-		}
+		// 累积录制文件信息（legacy 路径），待录制结束后统一推送摘要
+		r.accumulateRecordedFiles(fileName)
 
 		ffmpegPath, ffmpegErr := utils.GetFFmpegPathForLive(ctx, r.Live)
 		if ffmpegErr != nil {
@@ -547,19 +546,8 @@ func (r *recorder) tryRecord(ctx context.Context) {
 			return
 		}
 
-		// 发送录制文件摘要通知
-		var fileDetails []notify.RecordingFileDetail
-		for _, f := range outputFiles {
-			var size int64
-			if fi, err := os.Stat(f); err == nil {
-				size = fi.Size()
-			}
-			fileDetails = append(fileDetails, notify.RecordingFileDetail{
-				Name: filepath.Base(f),
-				Size: size,
-			})
-		}
-		notify.SendRecordingSummary(r.getLogger(), info.HostName, r.Live.GetPlatformCNName(), fileDetails)
+		// 累积录制文件信息，待录制结束后统一推送摘要
+		r.accumulateRecordedFiles(outputFiles...)
 
 		// 获取 PipelineManager
 		pipelineManager := pipeline.GetManager(inst)
@@ -637,6 +625,8 @@ func (r *recorder) selectPreferredStream(streamInfos []*live.StreamUrlInfo) (ret
 }
 
 func (r *recorder) run(ctx context.Context) {
+	defer r.sendAccumulatedSummary()
+
 	const minRetryInterval = 5 * time.Second
 
 	for {
@@ -665,6 +655,42 @@ func (r *recorder) run(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// accumulateRecordedFiles 累积录制文件信息，仅记录实际存在的文件
+func (r *recorder) accumulateRecordedFiles(files ...string) {
+	for _, f := range files {
+		if fi, err := os.Stat(f); err == nil {
+			r.recordedFiles = append(r.recordedFiles, notify.RecordingFileDetail{
+				Name: filepath.Base(f),
+				Size: fi.Size(),
+			})
+		}
+	}
+}
+
+// sendAccumulatedSummary 录制结束后统一推送录制文件摘要通知
+// 在 run() 退出时通过 defer 调用，确保所有分段文件汇总为一条通知
+func (r *recorder) sendAccumulatedSummary() {
+	if len(r.recordedFiles) == 0 {
+		return
+	}
+	obj, err := r.cache.Get(r.Live)
+	if err != nil {
+		return
+	}
+	info := obj.(*live.Info)
+
+	// 获取录制输出路径，用于查询剩余磁盘空间
+	cfg := configs.GetCurrentConfig()
+	outputPath := cfg.OutPutPath
+	if room, roomErr := cfg.GetLiveRoomByUrl(r.Live.GetRawUrl()); roomErr == nil {
+		platformKey := configs.GetPlatformKeyFromUrl(r.Live.GetRawUrl())
+		resolved := cfg.ResolveConfigForRoom(room, platformKey)
+		outputPath = resolved.OutPutPath
+	}
+
+	notify.SendRecordingSummary(r.getLogger(), info.HostName, r.Live.GetPlatformCNName(), r.recordedFiles, outputPath)
 }
 
 func (r *recorder) getParser() parser.Parser {
