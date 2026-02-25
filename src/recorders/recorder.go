@@ -189,6 +189,11 @@ type Recorder interface {
 	RequestSegment() bool
 	// HasFlvProxy 检查当前是否使用 FLV 代理
 	HasFlvProxy() bool
+	// CloseForRestart 用于分段重启场景：关闭 recorder 但不推送摘要，
+	// 等待 run() 完全退出后返回已累积的录制文件列表
+	CloseForRestart() []notify.RecordingFileDetail
+	// SetInitialRecordedFiles 设置初始录制文件列表（从上一个 recorder 继承）
+	SetInitialRecordedFiles(files []notify.RecordingFileDetail)
 }
 
 type recorder struct {
@@ -218,6 +223,11 @@ type recorder struct {
 
 	// 累积的录制文件信息，待录制结束后统一推送摘要
 	recordedFiles []notify.RecordingFileDetail
+
+	// done 在 run() 退出时关闭，用于 CloseForRestart 等待 goroutine 完成
+	done chan struct{}
+	// suppressSummary 为 true 时，run() 退出不推送摘要（分段重启场景）
+	suppressSummary bool
 }
 
 func NewRecorder(ctx context.Context, live live.Live) (Recorder, error) {
@@ -230,6 +240,7 @@ func NewRecorder(ctx context.Context, live live.Live) (Recorder, error) {
 		ed:         inst.EventDispatcher.(events.Dispatcher),
 		state:      begin,
 		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
 		parserLock: new(sync.RWMutex),
 	}, nil
 }
@@ -625,6 +636,7 @@ func (r *recorder) selectPreferredStream(streamInfos []*live.StreamUrlInfo) (ret
 }
 
 func (r *recorder) run(ctx context.Context) {
+	defer close(r.done)
 	defer r.sendAccumulatedSummary()
 
 	const minRetryInterval = 5 * time.Second
@@ -672,11 +684,17 @@ func (r *recorder) accumulateRecordedFiles(files ...string) {
 // sendAccumulatedSummary 录制结束后统一推送录制文件摘要通知
 // 在 run() 退出时通过 defer 调用，确保所有分段文件汇总为一条通知
 func (r *recorder) sendAccumulatedSummary() {
+	if r.suppressSummary {
+		r.getLogger().Infof("录制摘要推送已抑制（分段重启），累积 %d 个文件将传递给新 recorder", len(r.recordedFiles))
+		return
+	}
 	if len(r.recordedFiles) == 0 {
+		r.getLogger().Info("无录制文件，跳过摘要推送")
 		return
 	}
 	obj, err := r.cache.Get(r.Live)
 	if err != nil {
+		r.getLogger().WithError(err).Error("获取直播信息失败，无法推送录制摘要")
 		return
 	}
 	info := obj.(*live.Info)
@@ -690,6 +708,7 @@ func (r *recorder) sendAccumulatedSummary() {
 		outputPath = resolved.OutPutPath
 	}
 
+	r.getLogger().Infof("推送录制摘要：%d 个文件", len(r.recordedFiles))
 	notify.SendRecordingSummary(r.getLogger(), info.HostName, r.Live.GetPlatformCNName(), r.recordedFiles, outputPath)
 }
 
@@ -752,6 +771,19 @@ func (r *recorder) Close() {
 	}
 	r.getLogger().Info("Record End")
 	r.ed.DispatchEvent(events.NewEvent(RecorderStop, r.Live))
+}
+
+func (r *recorder) CloseForRestart() []notify.RecordingFileDetail {
+	r.suppressSummary = true
+	r.Close()
+	<-r.done // 等待 run() 完全退出，确保最后一个文件已累积
+	r.getLogger().Infof("分段重启：携带 %d 个累积文件传递给新 recorder", len(r.recordedFiles))
+	return r.recordedFiles
+}
+
+func (r *recorder) SetInitialRecordedFiles(files []notify.RecordingFileDetail) {
+	r.recordedFiles = append(files, r.recordedFiles...)
+	r.getLogger().Infof("继承上一个 recorder 的 %d 个录制文件", len(files))
 }
 
 func (r *recorder) getLogger() *livelogger.LiveLogger {
