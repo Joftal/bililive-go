@@ -26,8 +26,9 @@ func DecorateConfigNode(node *yaml.Node) {
 	if splitNode != nil {
 		setFieldComment(splitNode, "max_file_size",
 			`# 仅在使用 ffmpeg 或 bililive-recorder 下载器时生效
-# 单位为字节 (byte)
-# 有效值为正数，默认值 0 为无效
+# 支持可读格式，如: 500MB, 1GB, 1.5GB, 1024KB
+# 也支持纯数字（视为字节），如: 1073741824
+# 有效值为正数，默认值 0 为不限制
 # 负数为非法值，程序会输出 log 提醒，并无视所设定的数值`, "")
 	}
 

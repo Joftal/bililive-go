@@ -79,7 +79,7 @@ func (f *Feature) GetEffectiveDownloaderType() DownloaderType {
 type VideoSplitStrategies struct {
 	OnRoomNameChanged bool          `yaml:"on_room_name_changed" json:"on_room_name_changed"`
 	MaxDuration       time.Duration `yaml:"max_duration" json:"max_duration"`
-	MaxFileSize       int           `yaml:"max_file_size" json:"max_file_size"`
+	MaxFileSize       ByteSize      `yaml:"max_file_size" json:"max_file_size"`
 }
 
 // UploadTiming 上传时机

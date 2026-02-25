@@ -1438,7 +1438,11 @@ func applyConfigUpdates(c *configs.Config, updates map[string]interface{}) error
 			c.VideoSplitStrategies.MaxDuration = time.Duration(maxDuration)
 		}
 		if maxFileSize, ok := vss["max_file_size"].(float64); ok {
-			c.VideoSplitStrategies.MaxFileSize = int(maxFileSize)
+			c.VideoSplitStrategies.MaxFileSize = configs.ByteSize(int64(maxFileSize))
+		} else if maxFileSizeStr, ok := vss["max_file_size"].(string); ok {
+			if parsed, err := configs.ParseByteSize(maxFileSizeStr); err == nil {
+				c.VideoSplitStrategies.MaxFileSize = parsed
+			}
 		}
 	}
 

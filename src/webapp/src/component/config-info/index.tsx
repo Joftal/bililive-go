@@ -71,7 +71,7 @@ interface EffectiveConfig {
   video_split_strategies: {
     on_room_name_changed: boolean;
     max_duration: number;
-    max_file_size: number;
+    max_file_size: string;
   };
   on_record_finished: {
     convert_to_mp4: boolean;
@@ -626,9 +626,9 @@ const GlobalSettings: React.FC<{
               <InputNumber min={0} style={{ width: 200 }} />
             </Form.Item>
           </ConfigField>
-          <ConfigField label="最大文件大小 (字节)" description="单个视频的最大文件大小，0表示不限制">
+          <ConfigField label="最大文件大小" description="单个视频的最大文件大小，支持 MB/GB 等格式（如 500MB、1GB），0表示不限制">
             <Form.Item name={['video_split_strategies', 'max_file_size']} noStyle>
-              <InputNumber min={0} style={{ width: 200 }} />
+              <Input placeholder="如: 500MB, 1GB, 0" style={{ width: 200 }} />
             </Form.Item>
           </ConfigField>
         </Card>
