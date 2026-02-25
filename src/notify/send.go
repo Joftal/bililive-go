@@ -197,15 +197,11 @@ func buildRecordingSummaryMessage(hostName, platform string, files []RecordingFi
 	fmt.Fprintf(&sb, "平台：%s\n", platform)
 	fmt.Fprintf(&sb, "录制文件：%d 个\n", len(files))
 	var totalSize int64
-	displayCount := len(files)
-	if displayCount > maxDisplayFiles {
-		displayCount = maxDisplayFiles
-	}
-	for i := 0; i < displayCount; i++ {
-		fmt.Fprintf(&sb, "  %d. %s (%s)\n", i+1, files[i].Name, formatFileSize(files[i].Size))
-	}
-	for _, f := range files {
+	for i, f := range files {
 		totalSize += f.Size
+		if i < maxDisplayFiles {
+			fmt.Fprintf(&sb, "  %d. %s (%s)\n", i+1, f.Name, formatFileSize(f.Size))
+		}
 	}
 	if len(files) > maxDisplayFiles {
 		fmt.Fprintf(&sb, "  ... 还有 %d 个文件未显示\n", len(files)-maxDisplayFiles)
