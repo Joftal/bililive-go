@@ -1498,6 +1498,29 @@ func applyConfigUpdates(c *configs.Config, updates map[string]interface{}) error
 				c.Notify.Email.RecipientEmail = recipientEmail
 			}
 		}
+		if barkCfg, ok := notify["bark"].(map[string]interface{}); ok {
+			if enable, ok := barkCfg["enable"].(bool); ok {
+				c.Notify.Bark.Enable = enable
+			}
+			if serverURL, ok := barkCfg["serverURL"].(string); ok {
+				c.Notify.Bark.ServerURL = serverURL
+			}
+			if deviceKey, ok := barkCfg["deviceKey"].(string); ok {
+				c.Notify.Bark.DeviceKey = deviceKey
+			}
+			if sound, ok := barkCfg["sound"].(string); ok {
+				c.Notify.Bark.Sound = sound
+			}
+			if group, ok := barkCfg["group"].(string); ok {
+				c.Notify.Bark.Group = group
+			}
+			if icon, ok := barkCfg["icon"].(string); ok {
+				c.Notify.Bark.Icon = icon
+			}
+			if level, ok := barkCfg["level"].(string); ok {
+				c.Notify.Bark.Level = level
+			}
+		}
 	}
 
 	// 处理代理配置

@@ -5,6 +5,7 @@ import (
 
 	"github.com/bililive-go/bililive-go/src/configs"
 	"github.com/bililive-go/bililive-go/src/consts"
+	"github.com/bililive-go/bililive-go/src/notify/bark"
 	"github.com/bililive-go/bililive-go/src/notify/email"
 	"github.com/bililive-go/bililive-go/src/notify/ntfy"
 	"github.com/bililive-go/bililive-go/src/notify/telegram"
@@ -107,6 +108,44 @@ func SendNotification(logger *livelogger.LiveLogger, hostName, platform, liveURL
 				logger.Logger.WithError(err).Error("Failed to send Ntfy message")
 			} else {
 				fmt.Printf("[ERROR] Failed to send Ntfy message: %v\n", err)
+			}
+		}
+	}
+
+	// 检查是否开启了 Bark 通知服务
+	if cfg.Notify.Bark.Enable {
+		var err error
+		switch status {
+		case consts.LiveStatusStart:
+			err = bark.SendMessage(
+				cfg.Notify.Bark.ServerURL,
+				cfg.Notify.Bark.DeviceKey,
+				cfg.Notify.Bark.Sound,
+				cfg.Notify.Bark.Group,
+				cfg.Notify.Bark.Icon,
+				cfg.Notify.Bark.Level,
+				hostName,
+				platform,
+				liveURL,
+			)
+		case consts.LiveStatusStop:
+			err = bark.SendStopMessage(
+				cfg.Notify.Bark.ServerURL,
+				cfg.Notify.Bark.DeviceKey,
+				cfg.Notify.Bark.Sound,
+				cfg.Notify.Bark.Group,
+				cfg.Notify.Bark.Icon,
+				cfg.Notify.Bark.Level,
+				hostName,
+				platform,
+				liveURL,
+			)
+		}
+		if err != nil {
+			if logger != nil && logger.Logger != nil {
+				logger.Logger.WithError(err).Error("Failed to send Bark message")
+			} else {
+				fmt.Printf("[ERROR] Failed to send Bark message: %v\n", err)
 			}
 		}
 	}

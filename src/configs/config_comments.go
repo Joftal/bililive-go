@@ -62,6 +62,16 @@ func DecorateConfigNode(node *yaml.Node) {
 			setFieldComment(email, "senderPassword", "# 发送者邮箱授权码或应用专用密码", "")
 			setFieldComment(email, "recipientEmail", "# 接收者邮箱地址 ", "")
 		}
+		barkNode := findNode(notifyNode, "bark")
+		if barkNode != nil {
+			setFieldComment(barkNode, "enable", "# 是否开启Bark通知(iOS)", "")
+			setFieldComment(barkNode, "serverURL", "# Bark服务器地址，默认 https://api.day.app，支持自建", "")
+			setFieldComment(barkNode, "deviceKey", "# 设备推送密钥（在Bark App首页获取）", "")
+			setFieldComment(barkNode, "sound", "# 推送铃声（可选，如 alarm、birdsong、glass 等）", "")
+			setFieldComment(barkNode, "group", "# 通知分组名称（可选）", "")
+			setFieldComment(barkNode, "icon", "# 自定义图标URL（可选）", "")
+			setFieldComment(barkNode, "level", "# 通知级别（可选）: active/timeSensitive/passive/critical", "")
+		}
 	}
 
 	// 特殊处理 live_rooms
