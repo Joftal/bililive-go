@@ -110,12 +110,7 @@ func SendNotification(logger *livelogger.LiveLogger, hostName, platform, liveURL
 		}
 
 		if err != nil {
-			// 使用项目原来的日志打印方式打印错误
-			if logger != nil && logger.Logger != nil {
-				logger.Logger.WithError(err).Error("Failed to send Ntfy message")
-			} else {
-				fmt.Printf("[ERROR] Failed to send Ntfy message: %v\n", err)
-			}
+			logger.WithError(err).Error("Failed to send Ntfy message")
 		}
 	}
 
@@ -149,11 +144,7 @@ func SendNotification(logger *livelogger.LiveLogger, hostName, platform, liveURL
 			)
 		}
 		if err != nil {
-			if logger != nil && logger.Logger != nil {
-				logger.Logger.WithError(err).Error("Failed to send Bark message")
-			} else {
-				fmt.Printf("[ERROR] Failed to send Bark message: %v\n", err)
-			}
+			logger.WithError(err).Error("Failed to send Bark message")
 		}
 	}
 
@@ -275,11 +266,7 @@ func SendRecordingSummary(logger *livelogger.LiveLogger, hostName, platform stri
 			title,
 			body,
 		); err != nil {
-			if logger != nil && logger.Logger != nil {
-				logger.Logger.WithError(err).Error("Failed to send recording summary via Bark")
-			} else {
-				fmt.Printf("[ERROR] Failed to send recording summary via Bark: %v\n", err)
-			}
+			logger.WithError(err).Error("Failed to send recording summary via Bark")
 		}
 	}
 }
