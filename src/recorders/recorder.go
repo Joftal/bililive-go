@@ -23,6 +23,7 @@ import (
 	"github.com/bililive-go/bililive-go/src/configs"
 	"github.com/bililive-go/bililive-go/src/instance"
 	"github.com/bililive-go/bililive-go/src/live"
+	"github.com/bililive-go/bililive-go/src/notify"
 	"github.com/bililive-go/bililive-go/src/pipeline"
 	"github.com/bililive-go/bililive-go/src/pkg/events"
 	"github.com/bililive-go/bililive-go/src/pkg/livelogger"
@@ -445,6 +446,13 @@ func (r *recorder) tryRecord(ctx context.Context) {
 	// 使用层级配置的 OnRecordFinished
 	cmdStr := strings.Trim(resolvedConfig.OnRecordFinished.CustomCommandline, "")
 	if len(cmdStr) > 0 {
+		// 发送录制文件摘要通知（legacy 路径，单文件）
+		if fi, statErr := os.Stat(fileName); statErr == nil {
+			notify.SendRecordingSummary(r.getLogger(), info.HostName, r.Live.GetPlatformCNName(), []notify.RecordingFileDetail{
+				{Name: filepath.Base(fileName), Size: fi.Size()},
+			})
+		}
+
 		ffmpegPath, ffmpegErr := utils.GetFFmpegPathForLive(ctx, r.Live)
 		if ffmpegErr != nil {
 			r.getLogger().WithError(ffmpegErr).Error("failed to find ffmpeg")
@@ -538,6 +546,20 @@ func (r *recorder) tryRecord(ctx context.Context) {
 			r.getLogger().Warn("没有找到任何输出文件，跳过后处理")
 			return
 		}
+
+		// 发送录制文件摘要通知
+		var fileDetails []notify.RecordingFileDetail
+		for _, f := range outputFiles {
+			var size int64
+			if fi, err := os.Stat(f); err == nil {
+				size = fi.Size()
+			}
+			fileDetails = append(fileDetails, notify.RecordingFileDetail{
+				Name: filepath.Base(f),
+				Size: size,
+			})
+		}
+		notify.SendRecordingSummary(r.getLogger(), info.HostName, r.Live.GetPlatformCNName(), fileDetails)
 
 		// 获取 PipelineManager
 		pipelineManager := pipeline.GetManager(inst)

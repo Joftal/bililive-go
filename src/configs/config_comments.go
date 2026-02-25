@@ -46,6 +46,9 @@ func DecorateConfigNode(node *yaml.Node) {
 	setFieldHeadComment(root, "notify", "# 通知服务配置")
 	notifyNode := findNode(root, "notify")
 	if notifyNode != nil {
+		setFieldComment(notifyNode, "send_recording_summary",
+			`# 录制结束后是否推送录制文件摘要（文件数量、文件名、大小）
+# 需要至少开启一个通知渠道（Telegram/Email/Bark）才会生效`, "")
 		telegram := findNode(notifyNode, "telegram")
 		if telegram != nil {
 			setFieldComment(telegram, "enable", "# 是否开启Telegram通知", "")

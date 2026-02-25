@@ -1464,6 +1464,9 @@ func applyConfigUpdates(c *configs.Config, updates map[string]interface{}) error
 
 	// 处理通知配置
 	if notify, ok := updates["notify"].(map[string]interface{}); ok {
+		if sendRecordingSummary, ok := notify["send_recording_summary"].(bool); ok {
+			c.Notify.SendRecordingSummary = sendRecordingSummary
+		}
 		if telegram, ok := notify["telegram"].(map[string]interface{}); ok {
 			if enable, ok := telegram["enable"].(bool); ok {
 				c.Notify.Telegram.Enable = enable

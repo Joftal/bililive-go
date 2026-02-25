@@ -122,10 +122,11 @@ type Log struct {
 
 // 通知服务所需配置
 type Notify struct {
-	Telegram Telegram `yaml:"telegram" json:"telegram"`
-	Email    Email    `yaml:"email" json:"email"`
-	Ntfy     Ntfy     `yaml:"ntfy" json:"ntfy"`
-	Bark     Bark     `yaml:"bark" json:"bark"`
+	SendRecordingSummary bool     `yaml:"send_recording_summary" json:"send_recording_summary"` // 录制结束后推送录制文件摘要
+	Telegram             Telegram `yaml:"telegram" json:"telegram"`
+	Email                Email    `yaml:"email" json:"email"`
+	Ntfy                 Ntfy     `yaml:"ntfy" json:"ntfy"`
+	Bark                 Bark     `yaml:"bark" json:"bark"`
 }
 
 type Telegram struct {
@@ -632,6 +633,7 @@ var defaultConfig = Config{
 	},
 	TimeoutInUs: 60000000,
 	Notify: Notify{
+		SendRecordingSummary: false,
 		Telegram: Telegram{
 			Enable:           false,
 			WithNotification: true,

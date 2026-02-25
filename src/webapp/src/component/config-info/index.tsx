@@ -82,6 +82,7 @@ interface EffectiveConfig {
   timeout_in_us: number;
   timeout_in_seconds: number;
   notify: {
+    send_recording_summary: boolean;
     telegram: {
       enable: boolean;
       withNotification: boolean;
@@ -856,6 +857,15 @@ const NotifySettings: React.FC<{
   return (
     <div className="config-content">
       <Form form={form} layout="vertical">
+        {/* 录制摘要通知 */}
+        <Card title={<><BellOutlined /> 录制摘要</>} size="small" style={{ marginBottom: 16 }}>
+          <ConfigField label="推送录制摘要" description="录制结束后推送文件数量、文件名和大小等信息">
+            <Form.Item name={['send_recording_summary']} valuePropName="checked" noStyle>
+              <Switch />
+            </Form.Item>
+          </ConfigField>
+        </Card>
+
         {/* Telegram 通知 */}
         <Card title={<><BellOutlined /> Telegram 通知</>} size="small" style={{ marginBottom: 16 }}>
           <ConfigField label="启用" description="开启后会在直播开始/结束时发送 Telegram 通知">

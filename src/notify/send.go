@@ -2,6 +2,7 @@ package notify
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/bililive-go/bililive-go/src/configs"
 	"github.com/bililive-go/bililive-go/src/consts"
@@ -11,6 +12,12 @@ import (
 	"github.com/bililive-go/bililive-go/src/notify/telegram"
 	"github.com/bililive-go/bililive-go/src/pkg/livelogger"
 )
+
+// RecordingFileDetail 录制文件详情
+type RecordingFileDetail struct {
+	Name string // 文件名（不含路径）
+	Size int64  // 文件大小（字节）
+}
 
 // SendNotification 发送统一通知函数
 // 检测用户是否开启了telegram和email通知服务，然后分别发送通知
@@ -165,5 +172,94 @@ func SendTestNotification(logger *livelogger.LiveLogger) {
 	err = SendNotification(logger, "测试主播", "测试平台", "https://example.com/live", consts.LiveStatusStop)
 	if err != nil {
 		logger.WithError(err).Error("Failed to send stop live test notification")
+	}
+}
+
+// formatFileSize 将字节数格式化为可读的文件大小
+func formatFileSize(size int64) string {
+	const (
+		kb = 1024
+		mb = kb * 1024
+		gb = mb * 1024
+	)
+	switch {
+	case size >= gb:
+		return fmt.Sprintf("%.2f GB", float64(size)/float64(gb))
+	case size >= mb:
+		return fmt.Sprintf("%.2f MB", float64(size)/float64(mb))
+	case size >= kb:
+		return fmt.Sprintf("%.2f KB", float64(size)/float64(kb))
+	default:
+		return fmt.Sprintf("%d B", size)
+	}
+}
+
+// buildRecordingSummaryMessage 构造录制摘要消息内容
+func buildRecordingSummaryMessage(hostName, platform string, files []RecordingFileDetail) (title, body string) {
+	title = fmt.Sprintf("%s 录制完成", hostName)
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("平台：%s\n", platform))
+	sb.WriteString(fmt.Sprintf("录制文件：%d 个\n", len(files)))
+	var totalSize int64
+	for i, f := range files {
+		sb.WriteString(fmt.Sprintf("  %d. %s (%s)\n", i+1, f.Name, formatFileSize(f.Size)))
+		totalSize += f.Size
+	}
+	sb.WriteString(fmt.Sprintf("总大小：%s", formatFileSize(totalSize)))
+	body = sb.String()
+	return
+}
+
+// SendRecordingSummary 录制结束后发送录制文件摘要通知
+func SendRecordingSummary(logger *livelogger.LiveLogger, hostName, platform string, files []RecordingFileDetail) {
+	cfg := configs.GetCurrentConfig()
+	if cfg == nil || !cfg.Notify.SendRecordingSummary {
+		return
+	}
+	if len(files) == 0 {
+		return
+	}
+
+	title, body := buildRecordingSummaryMessage(hostName, platform, files)
+
+	// Telegram
+	if cfg.Notify.Telegram.Enable {
+		msg := fmt.Sprintf("%s\n%s", title, body)
+		if err := telegram.SendMessage(
+			cfg.Notify.Telegram.BotToken,
+			cfg.Notify.Telegram.ChatID,
+			msg,
+			cfg.Notify.Telegram.WithNotification,
+		); err != nil {
+			logger.WithError(err).Error("Failed to send recording summary via Telegram")
+		}
+	}
+
+	// Email
+	if cfg.Notify.Email.Enable {
+		if err := email.SendEmail(title, body); err != nil {
+			logger.WithError(err).Error("Failed to send recording summary via Email")
+		}
+	}
+
+	// Bark
+	if cfg.Notify.Bark.Enable {
+		if err := bark.SendSummaryMessage(
+			cfg.Notify.Bark.ServerURL,
+			cfg.Notify.Bark.DeviceKey,
+			cfg.Notify.Bark.Sound,
+			cfg.Notify.Bark.Group,
+			cfg.Notify.Bark.Icon,
+			cfg.Notify.Bark.Level,
+			title,
+			body,
+		); err != nil {
+			if logger != nil && logger.Logger != nil {
+				logger.Logger.WithError(err).Error("Failed to send recording summary via Bark")
+			} else {
+				fmt.Printf("[ERROR] Failed to send recording summary via Bark: %v\n", err)
+			}
+		}
 	}
 }

@@ -47,6 +47,11 @@ func SendStopMessage(serverURL, deviceKey, sound, group, icon, level, hostName, 
 	return sendRequest(serverURL, deviceKey, title, body, sound, group, icon, level, liveURL)
 }
 
+// SendSummaryMessage 发送 Bark 录制摘要通知
+func SendSummaryMessage(serverURL, deviceKey, sound, group, icon, level, title, body string) error {
+	return sendRequest(serverURL, deviceKey, title, body, sound, group, icon, level, "")
+}
+
 // sendRequest 发送 Bark HTTP 请求
 func sendRequest(serverURL, deviceKey, title, body, sound, group, icon, level, liveURL string) error {
 	serverURL = strings.TrimRight(serverURL, "/")
