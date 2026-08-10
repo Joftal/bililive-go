@@ -3,6 +3,7 @@ package openlist
 import (
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -53,7 +54,7 @@ func NewProgressReader(reader io.Reader, total int64, onProgress func(UploadProg
 func (pr *ProgressReader) Read(p []byte) (n int, err error) {
 	n, err = pr.reader.Read(p)
 	if n > 0 {
-		pr.uploaded += int64(n)
+		atomic.AddInt64(&pr.uploaded, int64(n))
 		pr.addSample(int64(n))
 		pr.maybeReport()
 	}
@@ -102,7 +103,8 @@ func (pr *ProgressReader) maybeReport() {
 	}
 
 	now := time.Now()
-	if now.Sub(pr.lastReport) < pr.reportInterval && pr.uploaded < pr.total {
+	uploaded := atomic.LoadInt64(&pr.uploaded)
+	if now.Sub(pr.lastReport) < pr.reportInterval && uploaded < pr.total {
 		return
 	}
 	pr.lastReport = now
@@ -110,12 +112,12 @@ func (pr *ProgressReader) maybeReport() {
 	elapsed := now.Sub(pr.startTime).Seconds()
 	var avgSpeed int64
 	if elapsed > 0 {
-		avgSpeed = int64(float64(pr.uploaded) / elapsed)
+		avgSpeed = int64(float64(uploaded) / elapsed)
 	}
 
 	instantSpeed := pr.calculateInstantSpeed()
 
-	remaining := pr.total - pr.uploaded
+	remaining := pr.total - uploaded
 	var eta int64
 	if avgSpeed > 0 {
 		eta = remaining / avgSpeed
@@ -123,11 +125,11 @@ func (pr *ProgressReader) maybeReport() {
 
 	var percentage float64
 	if pr.total > 0 {
-		percentage = float64(pr.uploaded) / float64(pr.total) * 100
+		percentage = float64(uploaded) / float64(pr.total) * 100
 	}
 
 	pr.onProgress(UploadProgress{
-		BytesUploaded:       pr.uploaded,
+		BytesUploaded:       uploaded,
 		TotalBytes:          pr.total,
 		SpeedBytesPerSec:    instantSpeed,
 		AvgSpeedBytesPerSec: avgSpeed,

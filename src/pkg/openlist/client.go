@@ -9,12 +9,24 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 )
+
+// encodePath 对路径的每个段分别编码，保留 / 分隔符
+func encodePath(path string) string {
+	segments := strings.Split(path, "/")
+	for i, seg := range segments {
+		segments[i] = url.PathEscape(seg)
+	}
+	return strings.Join(segments, "/")
+}
 
 // Client OpenList API 客户端
 type Client struct {
 	baseURL    string
 	token      string
+	username   string // 用于 token 刷新
+	password   string // 用于 token 刷新
 	httpClient *http.Client
 }
 
@@ -34,8 +46,60 @@ func (c *Client) SetToken(token string) {
 	c.token = token
 }
 
+// GetToken 获取当前 API Token
+func (c *Client) GetCurrentToken() string {
+	return c.token
+}
+
+// SetCredentials 设置用户名密码（用于 token 自动刷新）
+func (c *Client) SetCredentials(username, password string) {
+	c.username = username
+	c.password = password
+}
+
+// refreshToken 刷新 token
+func (c *Client) refreshToken(ctx context.Context) error {
+	if c.username == "" || c.password == "" {
+		return fmt.Errorf("无法刷新 token: 未配置用户名密码")
+	}
+	newToken, err := c.GetToken(ctx, c.username, c.password)
+	if err != nil {
+		return fmt.Errorf("刷新 token 失败: %w", err)
+	}
+	c.token = newToken
+	return nil
+}
+
+// isAuthError 判断是否为认证错误（HTTP 401/403）
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	// 匹配 "HTTP 401" 或 "HTTP 403" 格式，避免误匹配其他包含 401/403 的字符串
+	return strings.Contains(s, "HTTP 401") || strings.Contains(s, "HTTP 403")
+}
+
+// withRetry 执行 API 调用，遇到认证错误时自动刷新 token 重试
+func (c *Client) withRetry(ctx context.Context, fn func() error) error {
+	err := fn()
+	if isAuthError(err) {
+		if refreshErr := c.refreshToken(ctx); refreshErr == nil {
+			return fn()
+		}
+	}
+	return err
+}
+
 // Upload 上传文件（使用 PUT /api/fs/put）
 func (c *Client) Upload(ctx context.Context, localPath, remotePath string, onProgress func(UploadProgress)) error {
+	return c.withRetry(ctx, func() error {
+		return c.doUpload(ctx, localPath, remotePath, onProgress)
+	})
+}
+
+// doUpload 执行实际的上传操作
+func (c *Client) doUpload(ctx context.Context, localPath, remotePath string, onProgress func(UploadProgress)) error {
 	// 打开本地文件
 	file, err := os.Open(localPath)
 	if err != nil {
@@ -62,7 +126,8 @@ func (c *Client) Upload(ctx context.Context, localPath, remotePath string, onPro
 	req.Header.Set("Authorization", c.token)
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("Content-Length", fmt.Sprintf("%d", totalSize))
-	req.Header.Set("File-Path", url.PathEscape(remotePath))
+	// 对路径的每个段分别编码，保留 / 分隔符
+	req.Header.Set("File-Path", encodePath(remotePath))
 	req.ContentLength = totalSize
 
 	// 发送请求
@@ -82,10 +147,13 @@ func (c *Client) Upload(ctx context.Context, localPath, remotePath string, onPro
 		Code    int    `json:"code"`
 		Message string `json:"message"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
-		if result.Code != 200 {
-			return fmt.Errorf("上传失败: %s", result.Message)
-		}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		// 响应不是 JSON 格式，可能是空响应（某些 API 成功时返回空 body）
+		// 由于 HTTP 状态码是 200，视为成功
+		return nil
+	}
+	if result.Code != 200 {
+		return fmt.Errorf("上传失败: %s", result.Message)
 	}
 
 	return nil
@@ -102,75 +170,88 @@ type StorageInfo struct {
 
 // ListStorages 列出所有存储
 func (c *Client) ListStorages(ctx context.Context) ([]StorageInfo, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/api/admin/storage/list", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", c.token)
+	var storages []StorageInfo
+	err := c.withRetry(ctx, func() error {
+		req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/api/admin/storage/list", nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", c.token)
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("请求失败: %w", err)
-	}
-	defer resp.Body.Close()
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("请求失败: %w", err)
+		}
+		defer resp.Body.Close()
 
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			Content []StorageInfo `json:"content"`
-		} `json:"data"`
-	}
+		var result struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+			Data    struct {
+				Content []StorageInfo `json:"content"`
+			} `json:"data"`
+		}
 
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
-	}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Errorf("解析响应失败: %w", err)
+		}
 
-	if result.Code != 200 {
-		return nil, fmt.Errorf("API 错误: %s", result.Message)
-	}
+		if result.Code != 200 {
+			return fmt.Errorf("API 错误: %s", result.Message)
+		}
 
-	return result.Data.Content, nil
+		storages = result.Data.Content
+		return nil
+	})
+	return storages, err
 }
 
 // CheckStorageHealth 检查存储健康状态
 func (c *Client) CheckStorageHealth(ctx context.Context, storageName string) error {
-	body := fmt.Sprintf(`{"path":"/%s","refresh":true}`, storageName)
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/api/fs/list",
-		bytes.NewReader([]byte(body)))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", c.token)
-	req.Header.Set("Content-Type", "application/json")
+	return c.withRetry(ctx, func() error {
+		body, _ := json.Marshal(map[string]interface{}{
+			"path":    "/" + storageName,
+			"refresh": true,
+		})
+		req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/api/fs/list",
+			bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", c.token)
+		req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("存储连接失败: %w", err)
-	}
-	defer resp.Body.Close()
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("存储连接失败: %w", err)
+		}
+		defer resp.Body.Close()
 
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	}
+		var result struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		}
 
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("解析响应失败: %w", err)
-	}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Errorf("解析响应失败: %w", err)
+		}
 
-	if result.Code != 200 {
-		return fmt.Errorf("存储不可用: %s", result.Message)
-	}
+		if result.Code != 200 {
+			return fmt.Errorf("存储不可用: %s", result.Message)
+		}
 
-	return nil
+		return nil
+	})
 }
 
 // GetToken 获取管理员 Token（通过登录）
 func (c *Client) GetToken(ctx context.Context, username, password string) (string, error) {
-	body := fmt.Sprintf(`{"username":"%s","password":"%s"}`, username, password)
+	body, _ := json.Marshal(map[string]string{
+		"username": username,
+		"password": password,
+	})
 	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/api/auth/login",
-		bytes.NewReader([]byte(body)))
+		bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
@@ -203,33 +284,66 @@ func (c *Client) GetToken(ctx context.Context, username, password string) (strin
 
 // Mkdir 创建目录
 func (c *Client) Mkdir(ctx context.Context, remotePath string) error {
-	body := fmt.Sprintf(`{"path":"%s"}`, remotePath)
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/api/fs/mkdir",
-		bytes.NewReader([]byte(body)))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", c.token)
-	req.Header.Set("Content-Type", "application/json")
+	return c.withRetry(ctx, func() error {
+		body, _ := json.Marshal(map[string]string{
+			"path": remotePath,
+		})
+		req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/api/fs/mkdir",
+			bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", c.token)
+		req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("请求失败: %w", err)
-	}
-	defer resp.Body.Close()
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("请求失败: %w", err)
+		}
+		defer resp.Body.Close()
 
-	var result struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
+		var result struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Errorf("解析响应失败: %w", err)
+		}
+
+		// 目录已存在也算成功
+		if result.Code != 200 && result.Message != "file exists" {
+			return fmt.Errorf("创建目录失败: %s", result.Message)
+		}
+
+		return nil
+	})
+}
+
+// MkdirRecursive 递归创建目录
+func (c *Client) MkdirRecursive(ctx context.Context, remotePath string) error {
+	// 标准化路径
+	remotePath = strings.ReplaceAll(remotePath, "\\", "/")
+	if remotePath == "" || remotePath == "/" {
+		return nil
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("解析响应失败: %w", err)
+	// 分割路径
+	parts := strings.Split(strings.Trim(remotePath, "/"), "/")
+	if len(parts) == 0 {
+		return nil
 	}
 
-	// 目录已存在也算成功
-	if result.Code != 200 && result.Message != "file exists" {
-		return fmt.Errorf("创建目录失败: %s", result.Message)
+	// 逐级创建目录
+	currentPath := ""
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		currentPath += "/" + part
+		if err := c.Mkdir(ctx, currentPath); err != nil {
+			return err
+		}
 	}
 
 	return nil

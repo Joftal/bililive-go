@@ -31,7 +31,7 @@ const { TextArea } = Input;
 // 功能开关：代理配置（开发中，设为 false 隐藏 UI）
 // 与后端 configs.EnableProxyConfig 对应
 const ENABLE_PROXY_CONFIG = false;
-const ENABLE_CLOUD_UPLOAD_SETTINGS = false;
+const ENABLE_CLOUD_UPLOAD_SETTINGS = true;
 const { Panel } = Collapse;
 
 // 配置项类型定义
@@ -79,6 +79,27 @@ interface EffectiveConfig {
     delete_flv_after_convert: boolean;
     custom_commandline: string;
     fix_flv_at_first: boolean;
+    cloud_upload: {
+      enable: boolean;
+      storage_name: string;
+      upload_path_tmpl: string;
+      delete_after_upload: boolean;
+      delete_all_after_upload: boolean;
+    };
+    upload_timing: string;
+    burn_subtitles: boolean;
+    burn_subtitles_codec: string;
+    burn_subtitles_crf: string;
+    burn_subtitles_preset: string;
+    burn_delete_ass: boolean;
+    burn_delete_source: boolean;
+  };
+  openlist: {
+    port: number;
+    data_path: string;
+    username: string;
+    password: string;
+    token: string;
   };
   timeout_in_us: number;
   timeout_in_seconds: number;
@@ -665,7 +686,7 @@ const GlobalSettings: React.FC<{
               <Switch />
             </Form.Item>
           </ConfigField>
-          <ConfigField label="转换后删除 FLV" description="MP4 转换成功后删除原始 FLV 文件">
+          <ConfigField label="转换后删除 FLV" description="MP4 转换成功后标记原始 FLV 为待删除，全部处理阶段完成后才真正删除">
             <Form.Item name={['on_record_finished', 'delete_flv_after_convert']} valuePropName="checked" noStyle>
               <Switch />
             </Form.Item>
@@ -683,7 +704,7 @@ const GlobalSettings: React.FC<{
         </Card>
 
         {/* 云盘上传设置（开发中） */}
-        {ENABLE_CLOUD_UPLOAD_SETTINGS && <CloudUploadSettings config={config} />}
+        {ENABLE_CLOUD_UPLOAD_SETTINGS && <CloudUploadSettings config={config} form={form} />}
 
         {/* 高级设置 */}
         <Card title="高级设置" size="small" style={{ marginBottom: 16 }}>

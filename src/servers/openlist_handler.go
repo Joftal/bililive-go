@@ -25,12 +25,9 @@ type OpenListStorageHealthResponse struct {
 	Message string `json:"message,omitempty"`
 }
 
-// 全局 OpenList 管理器引用（由 main 设置）
-var globalOpenListManager *openlist.Manager
-
-// SetOpenListManager 设置全局 OpenList 管理器
+// SetOpenListManager 设置全局 OpenList 管理器（保留兼容性，实际设置到 openlist 包）
 func SetOpenListManager(m *openlist.Manager) {
-	globalOpenListManager = m
+	openlist.SetGlobalManager(m)
 }
 
 // getOpenListStatus 获取 OpenList 状态
@@ -45,7 +42,8 @@ func getOpenListStatus(writer http.ResponseWriter, r *http.Request) {
 	}
 
 	// 检查 OpenList 管理器是否存在
-	if globalOpenListManager == nil {
+	mgr := openlist.GetGlobalManager()
+	if mgr == nil {
 		if config.OnRecordFinished.CloudUpload.Enable {
 			response.Errors = append(response.Errors, "OpenList 管理器未初始化")
 		}
@@ -55,7 +53,7 @@ func getOpenListStatus(writer http.ResponseWriter, r *http.Request) {
 	}
 
 	// 检查 OpenList 是否运行
-	response.OpenListRunning = globalOpenListManager.IsRunning()
+	response.OpenListRunning = mgr.IsRunning()
 
 	if !response.OpenListRunning {
 		response.Errors = append(response.Errors, "OpenList 服务未运行")
@@ -64,10 +62,17 @@ func getOpenListStatus(writer http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 尝试获取存储列表
-	client := openlist.NewClient(globalOpenListManager.GetAPIEndpoint(), "")
+	// 使用凭据创建客户端
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
+
+	client, err := mgr.GetClient(ctx, config.OpenList.Token, config.OpenList.Username, config.OpenList.Password)
+	if err != nil {
+		response.Errors = append(response.Errors, "创建 OpenList 客户端失败: "+err.Error())
+		writer.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(writer).Encode(response)
+		return
+	}
 
 	storages, err := client.ListStorages(ctx)
 	if err != nil {
@@ -95,16 +100,25 @@ func checkOpenListStorageHealth(writer http.ResponseWriter, r *http.Request) {
 		Healthy: false,
 	}
 
-	if globalOpenListManager == nil || !globalOpenListManager.IsRunning() {
+	mgr := openlist.GetGlobalManager()
+	if mgr == nil || !mgr.IsRunning() {
 		response.Message = "OpenList 服务未运行"
 		writer.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(writer).Encode(response)
 		return
 	}
 
-	client := openlist.NewClient(globalOpenListManager.GetAPIEndpoint(), "")
+	config := configs.GetCurrentConfig()
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
+
+	client, err := mgr.GetClient(ctx, config.OpenList.Token, config.OpenList.Username, config.OpenList.Password)
+	if err != nil {
+		response.Message = "创建 OpenList 客户端失败: " + err.Error()
+		writer.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(writer).Encode(response)
+		return
+	}
 
 	if err := client.CheckStorageHealth(ctx, storageName); err != nil {
 		response.Message = err.Error()

@@ -16,7 +16,6 @@ import (
 	bilisentry "github.com/bililive-go/bililive-go/src/pkg/sentry"
 	"github.com/bililive-go/bililive-go/src/pkg/utils"
 	"github.com/bililive-go/bililive-go/src/tools"
-	"github.com/sirupsen/logrus"
 )
 
 // BurnSubtitlesStage 弹幕字幕烧录阶段
@@ -197,27 +196,24 @@ func (s *BurnSubtitlesStage) Execute(ctx *pipeline.PipelineContext, input []pipe
 			SourcePath: file.Path,
 		})
 
-		// 可选：删除 ASS 文件
+		// 可选：标记 ASS 文件为可删除（由 Executor 在管道全部成功后统一删除）
 		if s.deleteAss {
-			if err := os.Remove(assPath); err != nil {
-				logrus.WithError(err).WithField("file", assPath).Warn("failed to delete ASS file")
-				s.logs += fmt.Sprintf("删除 ASS 文件失败: %s\n", assPath)
-			} else {
-				s.logs += fmt.Sprintf("已删除 ASS 文件: %s\n", assPath)
-				ctx.Logger.Infof("已删除 ASS 文件: %s", assPath)
-			}
+			output = append(output, pipeline.FileInfo{
+				Path:      assPath,
+				Type:      pipeline.FileTypeOther,
+				Deletable: true,
+			})
+			s.logs += fmt.Sprintf("已标记 ASS 文件待删除: %s\n", assPath)
+			ctx.Logger.Infof("已标记 ASS 文件待删除: %s", assPath)
 		}
 
-		// 可选：删除源视频文件
+		// 可选：标记源视频文件为可删除（由 Executor 在管道全部成功后统一删除）
 		if s.deleteSource && file.Path != outputPath {
-			if err := os.Remove(file.Path); err != nil {
-				logrus.WithError(err).WithField("file", file.Path).Warn("failed to delete source video file")
-				s.logs += fmt.Sprintf("删除源视频文件失败: %s\n", file.Path)
-			} else {
-				s.logs += fmt.Sprintf("已删除源视频文件: %s\n", file.Path)
-				ctx.Logger.Infof("已删除源视频文件: %s", file.Path)
-			}
+			file.Deletable = true
+			s.logs += fmt.Sprintf("已标记源视频文件待删除: %s\n", file.Path)
+			ctx.Logger.Infof("已标记源视频文件待删除: %s", file.Path)
 		}
+		output = append(output, file)
 
 		s.logs += fmt.Sprintf("字幕烧录完成: %s -> %s\n", filepath.Base(file.Path), filepath.Base(outputPath))
 		ctx.Logger.Infof("字幕烧录完成: %s", outputPath)

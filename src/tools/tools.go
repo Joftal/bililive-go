@@ -580,12 +580,15 @@ func Init() (err error) {
 	}
 	tools.SetRootFolder(preferredWritable)
 	// 为不可执行场景指定临时执行目录（容器内目录，具备执行权限）
-	execTmp := filepath.Join(string(os.PathSeparator), "opt", "bililive", "tmp_for_exec")
-	if mkErr := os.MkdirAll(execTmp, 0o755); mkErr != nil {
-		blog.GetLogger().WithError(mkErr).Warnf("无法创建临时执行目录 %s，某些外部工具可能无法运行", execTmp)
-		logDirectoryPermissionDiagnostics(execTmp)
+	// 仅在容器内创建，桌面环境下使用默认的临时目录即可
+	if configs.IsInContainer() {
+		execTmp := filepath.Join(string(os.PathSeparator), "opt", "bililive", "tmp_for_exec")
+		if mkErr := os.MkdirAll(execTmp, 0o755); mkErr != nil {
+			blog.GetLogger().WithError(mkErr).Warnf("无法创建临时执行目录 %s，某些外部工具可能无法运行", execTmp)
+			logDirectoryPermissionDiagnostics(execTmp)
+		}
+		tools.SetTmpRootFolderForExecPermission(execTmp)
 	}
-	tools.SetTmpRootFolderForExecPermission(execTmp)
 
 	err = api.StartWebUI(0)
 	if err != nil {

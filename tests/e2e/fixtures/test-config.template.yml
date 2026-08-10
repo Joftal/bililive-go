@@ -101,6 +101,9 @@ proxy:
 openlist:
   port: 5244
   data_path: ""
+  username: ""
+  password: ""
+  token: ""
 update:
   auto_check: false
   check_interval_hours: 6

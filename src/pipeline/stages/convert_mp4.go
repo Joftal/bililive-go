@@ -16,7 +16,6 @@ import (
 	bilisentry "github.com/bililive-go/bililive-go/src/pkg/sentry"
 	"github.com/bililive-go/bililive-go/src/pkg/utils"
 	"github.com/bililive-go/bililive-go/src/tools"
-	"github.com/sirupsen/logrus"
 )
 
 // ConvertMp4Stage MP4 转换阶段
@@ -157,21 +156,13 @@ func (s *ConvertMp4Stage) Execute(ctx *pipeline.PipelineContext, input []pipelin
 			SourcePath: file.Path,
 		})
 
-		// 删除原始文件
+		// 标记原始文件为可删除（由 Executor 在管道全部成功后统一删除）
 		if s.deleteSource && file.Path != outputPath {
-			if err := os.Remove(file.Path); err != nil {
-				logrus.WithError(err).WithField("file", file.Path).Warn("failed to delete original file")
-				s.logs += fmt.Sprintf("删除原始文件失败: %s\n", file.Path)
-			} else {
-				s.logs += fmt.Sprintf("已删除原始文件: %s\n", file.Path)
-				ctx.Logger.Infof("已删除原始文件: %s", file.Path)
-			}
-		} else {
-			// 保留原始文件在输出中
-			if !s.deleteSource {
-				output = append(output, file)
-			}
+			file.Deletable = true
+			s.logs += fmt.Sprintf("已标记原始文件待删除: %s\n", file.Path)
+			ctx.Logger.Infof("已标记原始文件待删除: %s", file.Path)
 		}
+		output = append(output, file)
 
 		s.logs += fmt.Sprintf("转换完成: %s -> %s\n", filepath.Base(file.Path), filepath.Base(outputPath))
 		ctx.Logger.Infof("MP4 转换完成: %s", outputPath)

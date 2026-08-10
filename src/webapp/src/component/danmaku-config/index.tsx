@@ -569,6 +569,7 @@ const DanmakuSettings: React.FC = () => {
               label="烧录后删除 ASS 文件"
               name="burn_delete_ass"
               valuePropName="checked"
+              extra="烧录成功后标记 ASS 文件为待删除，全部处理阶段完成后才真正删除"
             >
               <Switch />
             </Form.Item>
@@ -576,7 +577,7 @@ const DanmakuSettings: React.FC = () => {
               label="烧录后删除源视频"
               name="burn_delete_source"
               valuePropName="checked"
-              extra="删除烧录前的 MP4/FLV 源文件，仅保留 MKV"
+              extra="烧录成功后标记源视频为待删除，全部处理阶段完成后才真正删除。仅保留 MKV"
             >
               <Switch />
             </Form.Item>

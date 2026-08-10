@@ -10,3 +10,8 @@ import (
 func isInContainer() bool {
 	return strings.ToLower(strings.TrimSpace(os.Getenv("IS_DOCKER"))) == "true"
 }
+
+// IsInContainer 导出版本，供其他包使用
+func IsInContainer() bool {
+	return isInContainer()
+}

@@ -29,9 +29,9 @@ test.describe('设置页面测试', () => {
     expect(count).toBeGreaterThan(0);
   });
 
-  test('云盘上传设置已隐藏', async ({ page }) => {
+  test('云盘上传设置已显示', async ({ page }) => {
     await expect(page.getByRole('main')).toBeVisible();
-    await expect(page.getByText('云盘上传')).toHaveCount(0);
+    await expect(page.getByText('云盘上传').first()).toBeVisible();
   });
 
   test('输入框可以编辑', async ({ page }) => {

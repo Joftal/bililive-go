@@ -42,6 +42,10 @@ func DecorateConfigNode(node *yaml.Node) {
 #  以下是一个在录制结束后将 flv 视频转换为同名 mp4 视频的示例：
 #  custom_commandline: '{{ .Ffmpeg }} -hide_banner -i "{{ .FileName }}" -c copy "{{ .FileName | trimSuffix (.FileName | ext)}}.mp4"'`, "")
 
+		setFieldComment(finishNode, "delete_flv_after_convert",
+			`# MP4 转换成功后标记原始 FLV 为待删除，全部处理阶段完成后才真正删除
+# 默认 false（保留原始 FLV 文件）`, "")
+
 		setFieldComment(finishNode, "burn_subtitles",
 			`# 是否将 ASS 弹幕字幕硬编码（烧录）到视频中
 # 开启后会使用 FFmpeg 重编码视频，将字幕叠加到画面上
@@ -64,13 +68,23 @@ func DecorateConfigNode(node *yaml.Node) {
 # 默认 medium，越慢画质越好但耗时越长`, "")
 
 		setFieldComment(finishNode, "burn_delete_ass",
-			`# 烧录完成后是否删除原始 ASS 字幕文件
+			`# 烧录成功后标记 ASS 文件为待删除，全部处理阶段完成后才真正删除
 # 默认 false（保留 ASS 文件）`, "")
 
 		setFieldComment(finishNode, "burn_delete_source",
-			`# 烧录完成后是否删除源视频文件（如 MP4/FLV）
+			`# 烧录成功后标记源视频文件为待删除，全部处理阶段完成后才真正删除
 # 默认 false（保留源文件，同时存在源文件和烧录后的 MKV）
 # 开启后仅保留烧录完成的 MKV 文件`, "")
+
+		cloudNode := findNode(finishNode, "cloud_upload")
+		if cloudNode != nil {
+			setFieldComment(cloudNode, "delete_after_upload",
+				`# 选「处理完再上传」时，上传成功后仅删除已上传的文件（如最终视频），不影响其他中间文件
+# 选「先上传再处理」时此开关无效`, "")
+			setFieldComment(cloudNode, "delete_all_after_upload",
+				`# 选「处理完再上传」时，上传成功后删除所有本地文件（含中间产物）
+# 选「先上传再处理」时此开关无效`, "")
+		}
 	}
 
 	setFieldHeadComment(root, "notify", "# 通知服务配置")

@@ -1709,6 +1709,28 @@ func applyConfigUpdates(c *configs.Config, updates map[string]interface{}) error
 		if deleteSource, ok := orf["burn_delete_source"].(bool); ok {
 			c.OnRecordFinished.BurnDeleteSource = deleteSource
 		}
+		// 处理云上传配置
+		if cloudUpload, ok := orf["cloud_upload"].(map[string]interface{}); ok {
+			if enable, ok := cloudUpload["enable"].(bool); ok {
+				c.OnRecordFinished.CloudUpload.Enable = enable
+			}
+			if storageName, ok := cloudUpload["storage_name"].(string); ok {
+				c.OnRecordFinished.CloudUpload.StorageName = storageName
+			}
+			if uploadPathTmpl, ok := cloudUpload["upload_path_tmpl"].(string); ok {
+				c.OnRecordFinished.CloudUpload.UploadPathTmpl = uploadPathTmpl
+			}
+			if deleteAfter, ok := cloudUpload["delete_after_upload"].(bool); ok {
+				c.OnRecordFinished.CloudUpload.DeleteAfterUpload = deleteAfter
+			}
+			if deleteAllAfter, ok := cloudUpload["delete_all_after_upload"].(bool); ok {
+				c.OnRecordFinished.CloudUpload.DeleteAllAfterUpload = deleteAllAfter
+			}
+		}
+		// 处理上传时机
+		if uploadTiming, ok := orf["upload_timing"].(string); ok {
+			c.OnRecordFinished.UploadTiming = configs.UploadTiming(uploadTiming)
+		}
 	}
 
 	// 处理通知配置
@@ -1846,6 +1868,25 @@ func applyConfigUpdates(c *configs.Config, updates map[string]interface{}) error
 		}
 		if includePrerelease, ok := update["include_prerelease"].(bool); ok {
 			c.Update.IncludePrerelease = includePrerelease
+		}
+	}
+
+	// 处理 OpenList 配置
+	if openlistCfg, ok := updates["openlist"].(map[string]interface{}); ok {
+		if port, ok := openlistCfg["port"].(float64); ok {
+			c.OpenList.Port = int(port)
+		}
+		if dataPath, ok := openlistCfg["data_path"].(string); ok {
+			c.OpenList.DataPath = dataPath
+		}
+		if username, ok := openlistCfg["username"].(string); ok {
+			c.OpenList.Username = username
+		}
+		if password, ok := openlistCfg["password"].(string); ok {
+			c.OpenList.Password = password
+		}
+		if token, ok := openlistCfg["token"].(string); ok {
+			c.OpenList.Token = token
 		}
 	}
 

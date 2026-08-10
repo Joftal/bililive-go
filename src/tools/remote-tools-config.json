@@ -189,36 +189,36 @@
     }
   },
   "openlist": {
-    "v4.1.9": {
+    "v4.2.4": {
       "downloadUrl": {
         "darwin": {
           "amd64": [
-            "https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-darwin-amd64.tar.gz",
-            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-darwin-amd64.tar.gz"
+            "https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-darwin-amd64.tar.gz",
+            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-darwin-amd64.tar.gz"
           ],
           "arm64": [
-            "https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-darwin-arm64.tar.gz",
-            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-darwin-arm64.tar.gz"
+            "https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-darwin-arm64.tar.gz",
+            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-darwin-arm64.tar.gz"
           ]
         },
         "linux": {
           "amd64": [
-            "https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-linux-amd64.tar.gz",
-            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-linux-amd64.tar.gz"
+            "https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-linux-amd64.tar.gz",
+            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-linux-amd64.tar.gz"
           ],
           "arm64": [
-            "https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-linux-arm64.tar.gz",
-            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-linux-arm64.tar.gz"
+            "https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-linux-arm64.tar.gz",
+            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-linux-arm64.tar.gz"
           ],
           "arm": [
-            "https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-linux-armv7.tar.gz",
-            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-linux-armv7.tar.gz"
+            "https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-linux-arm-7.tar.gz",
+            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-linux-arm-7.tar.gz"
           ]
         },
         "windows": {
           "amd64": [
-            "https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-windows-amd64.zip",
-            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.1.9/openlist-windows-amd64.zip"
+            "https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-windows-amd64.zip",
+            "https://bililive-go.com/remotetools/download?downloadurl=https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-windows-amd64.zip"
           ]
         }
       },

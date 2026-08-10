@@ -787,7 +787,12 @@ func (r *recorder) tryRecord(ctx context.Context) {
 		if err := pipelineManager.EnqueueRecordingTask(info, pipelineConfig, outputFiles); err != nil {
 			r.getLogger().WithError(err).Error("failed to enqueue pipeline task")
 		} else {
-			r.getLogger().Infof("pipeline task enqueued: %d files, %d stages", len(outputFiles), len(pipelineConfig.Stages))
+			// 记录 Pipeline 阶段顺序
+			var stageNames []string
+			for _, stage := range pipelineConfig.Stages {
+				stageNames = append(stageNames, stage.Name)
+			}
+			r.getLogger().Infof("pipeline task enqueued: %d files, stages: %s", len(outputFiles), stageNames)
 		}
 	}
 }

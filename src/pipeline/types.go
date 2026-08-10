@@ -33,6 +33,7 @@ type FileInfo struct {
 	Type       FileType       `json:"type"`                  // 文件类型
 	SourcePath string         `json:"source_path,omitempty"` // 来源文件路径（用于追踪转换链）
 	Metadata   map[string]any `json:"metadata,omitempty"`    // 额外元数据
+	Deletable  bool           `json:"deletable,omitempty"`   // 标记此文件在管道全部成功后可删除
 }
 
 // NewVideoFileInfo 创建视频文件信息
