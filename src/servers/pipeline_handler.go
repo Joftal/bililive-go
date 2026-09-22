@@ -2,6 +2,7 @@ package servers
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -165,6 +166,8 @@ func makePipelineCancelTaskHandler(pm *pipeline.Manager) http.HandlerFunc {
 }
 
 // makePipelineRetryTaskHandler 重试任务
+// 支持可选的 JSON body: {"stage_name": "cloud_upload"}
+// 无 body 或 stage_name 为空时全量重试
 func makePipelineRetryTaskHandler(pm *pipeline.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		vars := mux.Vars(r)
@@ -174,9 +177,29 @@ func makePipelineRetryTaskHandler(pm *pipeline.Manager) http.HandlerFunc {
 			return
 		}
 
-		if err := pm.RetryTask(id); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+		// 解析可选的 JSON body
+		var reqBody struct {
+			StageName string `json:"stage_name"`
+		}
+		if r.Body != nil {
+			if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil && err != io.EOF {
+				http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+
+		if reqBody.StageName != "" {
+			// 从指定阶段重试
+			if err := pm.RetryTaskFromStage(id, reqBody.StageName); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else {
+			// 全量重试（向后兼容）
+			if err := pm.RetryTask(id); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 
 		w.WriteHeader(http.StatusOK)
@@ -324,7 +347,7 @@ func makeBatchBurnHandler(pm *pipeline.Manager) http.HandlerFunc {
 			}
 			task := pipeline.NewPipelineTask(recordInfo, burnConfig, files)
 
-			if err := pm.EnqueueTask(task); err != nil {
+			if err := pm.EnqueueTask(task, nil); err != nil {
 				result.Skipped = append(result.Skipped, filepath.Base(p)+" - 入队失败: "+err.Error())
 				continue
 			}

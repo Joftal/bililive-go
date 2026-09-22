@@ -83,6 +83,13 @@ func (s *BurnSubtitlesStage) Execute(ctx *pipeline.PipelineContext, input []pipe
 			continue
 		}
 
+		// 跳过已标记待删除的文件（如 ConvertMp4 阶段标记的原始 FLV），
+		// 但仍将其透传到 output，保证 Executor 的延迟删除机制正常工作。
+		if file.Deletable {
+			output = append(output, file)
+			continue
+		}
+
 		// 检查文件是否存在
 		if _, err := os.Stat(file.Path); os.IsNotExist(err) {
 			s.logs += fmt.Sprintf("文件不存在: %s\n", file.Path)

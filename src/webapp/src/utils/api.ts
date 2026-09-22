@@ -171,6 +171,22 @@ class API {
     }
 
     /**
+     * 上传单个文件到云盘
+     * @param path 文件路径
+     */
+    uploadFile(path: string) {
+        return utils.requestPost(`${BASE_URL}/file/upload`, { path });
+    }
+
+    /**
+     * 批量上传文件到云盘
+     * @param paths 文件路径列表
+     */
+    batchUploadFiles(paths: string[]) {
+        return utils.requestPost(`${BASE_URL}/batch/file/upload`, { paths });
+    }
+
+    /**
      * 获取Cookie列表
      */
     getCookieList() {

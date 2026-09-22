@@ -35,6 +35,7 @@ import (
 	applog "github.com/bililive-go/bililive-go/src/log"
 	"github.com/bililive-go/bililive-go/src/pkg/livelogger"
 	"github.com/bililive-go/bililive-go/src/pkg/memstats"
+	"github.com/bililive-go/bililive-go/src/pkg/metadata"
 	"github.com/bililive-go/bililive-go/src/pkg/ratelimit"
 	"github.com/bililive-go/bililive-go/src/pkg/utils"
 	"github.com/bililive-go/bililive-go/src/recorders"
@@ -184,7 +185,13 @@ func getLive(writer http.ResponseWriter, r *http.Request) {
 	}
 
 	// 获取平台等待状态信息
-	waitInfo := ratelimit.GetGlobalRateLimiter().GetPlatformWaitInfo(platformKey)
+	platformRateLimiter := ratelimit.GetGlobalRateLimiter()
+	platformRateLimitEnabled := platformRateLimiter.Enabled()
+	waitInfo := platformRateLimiter.GetPlatformWaitInfo(platformKey)
+	platformRateLimit := 0
+	if platformRateLimitEnabled {
+		platformRateLimit = cfg.GetPlatformMinAccessInterval(platformKey)
+	}
 
 	// 获取调度器状态信息
 	var schedulerStatus *live.SchedulerStatus
@@ -249,10 +256,12 @@ func getLive(writer http.ResponseWriter, r *http.Request) {
 		"audio_only":            room.AudioOnly,
 
 		// 平台访问限制
-		"platform_rate_limit": cfg.GetPlatformMinAccessInterval(platformKey),
+		"platform_rate_limit":         platformRateLimit,
+		"platform_rate_limit_enabled": platformRateLimitEnabled,
 
 		// 平台等待状态
 		"rate_limit_info": map[string]interface{}{
+			"enabled":             platformRateLimitEnabled,
 			"waited_seconds":      waitInfo.WaitedSeconds,
 			"next_request_in_sec": waitInfo.NextRequestInSec,
 			"min_interval_sec":    waitInfo.MinIntervalSec,
@@ -468,7 +477,8 @@ func parseLiveAction(writer http.ResponseWriter, r *http.Request) {
 	case "forceRefresh":
 		// 强制刷新：忽略平台访问频率限制，立即获取最新信息
 		platformKey := configs.GetPlatformKeyFromUrl(live.GetRawUrl())
-		ratelimit.GetGlobalRateLimiter().ForceAccess(platformKey)
+		platformRateLimiter := ratelimit.GetGlobalRateLimiter()
+		platformRateLimiter.ForceAccess(platformKey)
 
 		// 手动调用 GetInfo 获取最新信息
 		info, err := live.GetInfo()
@@ -480,8 +490,9 @@ func parseLiveAction(writer http.ResponseWriter, r *http.Request) {
 		}
 
 		// 广播频率限制更新事件，通知前端更新倒计时
-		waitInfo := ratelimit.GetGlobalRateLimiter().GetPlatformWaitInfo(platformKey)
+		waitInfo := platformRateLimiter.GetPlatformWaitInfo(platformKey)
 		GetSSEHub().BroadcastRateLimitUpdate(live.GetLiveId(), map[string]interface{}{
+			"enabled":             platformRateLimiter.Enabled(),
 			"waited_seconds":      waitInfo.WaitedSeconds,
 			"next_request_in_sec": waitInfo.NextRequestInSec,
 			"min_interval_sec":    waitInfo.MinIntervalSec,
@@ -941,8 +952,9 @@ func getConfig(writer http.ResponseWriter, r *http.Request) {
 }
 
 func putConfig(writer http.ResponseWriter, r *http.Request) {
+	// 直接序列化当前快照即可；索引缓存不参与序列化，且共享快照不可变，
+	// 不能在此调用 RefreshLiveRoomIndexCache 写它的 map。
 	config := configs.GetCurrentConfig()
-	config.RefreshLiveRoomIndexCache()
 	if err := config.Marshal(); err != nil {
 		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{
 			ErrNo:  http.StatusBadRequest,
@@ -991,7 +1003,8 @@ func putRawConfig(writer http.ResponseWriter, r *http.Request) {
 		return
 	}
 	oldConfig := configs.GetCurrentConfig()
-	oldConfig.RefreshLiveRoomIndexCache()
+	// 共享快照不可变：其索引缓存在生成时已由 Update 维护好，
+	// 这里只做只读查找，不能再调用 RefreshLiveRoomIndexCache 写它的 map。
 	// 继承原配置的文件路径
 	newConfig.File = oldConfig.File
 	// 预先将旧配置中的 LiveId 迁移到新配置（相同 URL）
@@ -1186,6 +1199,7 @@ func getPlatformStats(writer http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	platformRateLimitEnabled := ratelimit.GetGlobalRateLimiter().Enabled()
 
 	// 统计每个平台的直播间（只统计正在监控的）
 	platformRooms := make(map[string][]map[string]interface{})
@@ -1268,7 +1282,7 @@ func getPlatformStats(writer http.ResponseWriter, r *http.Request) {
 
 		// 检查是否低于最小访问间隔
 		warningMessage := ""
-		if listeningCount > 0 && platformConfig.MinAccessIntervalSec > 0 && actualAccessInterval < float64(platformConfig.MinAccessIntervalSec) {
+		if platformRateLimitEnabled && listeningCount > 0 && platformConfig.MinAccessIntervalSec > 0 && actualAccessInterval < float64(platformConfig.MinAccessIntervalSec) {
 			effectiveInterval := float64(platformConfig.MinAccessIntervalSec) * float64(listeningCount)
 			warningMessage = fmt.Sprintf("当前设置下实际每个直播间的检测间隔约为 %.1f 秒（受最小访问间隔限制）", effectiveInterval)
 		}
@@ -1348,9 +1362,10 @@ func getPlatformStats(writer http.ResponseWriter, r *http.Request) {
 	}
 
 	response := map[string]interface{}{
-		"platforms":           stats,
-		"available_platforms": availablePlatforms,
-		"global_interval":     cfg.Interval,
+		"platforms":                   stats,
+		"available_platforms":         availablePlatforms,
+		"global_interval":             cfg.Interval,
+		"platform_rate_limit_enabled": platformRateLimitEnabled,
 	}
 
 	writeJSON(writer, response)
@@ -1725,6 +1740,9 @@ func applyConfigUpdates(c *configs.Config, updates map[string]interface{}) error
 			}
 			if deleteAllAfter, ok := cloudUpload["delete_all_after_upload"].(bool); ok {
 				c.OnRecordFinished.CloudUpload.DeleteAllAfterUpload = deleteAllAfter
+			}
+			if uploadSubtitles, ok := cloudUpload["upload_subtitles"].(bool); ok {
+				c.OnRecordFinished.CloudUpload.UploadSubtitles = uploadSubtitles
 			}
 		}
 		// 处理上传时机
@@ -2419,6 +2437,7 @@ func getFileInfo(writer http.ResponseWriter, r *http.Request) {
 		LastModified int64  `json:"last_modified"`
 		Size         int64  `json:"size"`
 		SubtitleFile string `json:"subtitle_file,omitempty"`
+		Uploaded     bool   `json:"uploaded,omitempty"`
 	}
 
 	// First pass: separate ASS files and build base-name -> ASS file map
@@ -2460,6 +2479,14 @@ func getFileInfo(writer http.ResponseWriter, r *http.Request) {
 			}
 			if assName, ok := assFiles[baseName]; ok {
 				jf.SubtitleFile = assName
+			}
+			// Check if this file has been uploaded to cloud
+			relPath := fe.dir.Name()
+			if path != "" {
+				relPath = path + "/" + fe.dir.Name() // key 统一用正斜杠
+			}
+			if val, err := metadata.GetStore().Get(r.Context(), metadata.NamespaceUploaded, relPath); err == nil && val != "" {
+				jf.Uploaded = true
 			}
 		}
 		jsonFiles = append(jsonFiles, jf)
@@ -2580,6 +2607,30 @@ func renameFile(writer http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 迁移上传标记（key 统一用正斜杠）
+	oldRel := path
+	newRelPath, _ := filepath.Rel(base, newAbsPath)
+	newRel := filepath.ToSlash(newRelPath)
+	if info.IsDir() {
+		// 目录重命名：迁移该目录下所有文件的上传标记
+		allMarks, _ := metadata.GetStore().GetAll(r.Context(), metadata.NamespaceUploaded)
+		oldPrefix := oldRel + "/"
+		for key, val := range allMarks {
+			if strings.HasPrefix(key, oldPrefix) {
+				suffix := key[len(oldPrefix):]
+				newKey := newRel + "/" + suffix
+				metadata.GetStore().Set(r.Context(), metadata.NamespaceUploaded, newKey, val)
+				metadata.GetStore().Delete(r.Context(), metadata.NamespaceUploaded, key)
+			}
+		}
+	} else {
+		// 文件重命名：迁移单个上传标记
+		if val, err := metadata.GetStore().Get(r.Context(), metadata.NamespaceUploaded, oldRel); err == nil {
+			metadata.GetStore().Set(r.Context(), metadata.NamespaceUploaded, newRel, val)
+			metadata.GetStore().Delete(r.Context(), metadata.NamespaceUploaded, oldRel)
+		}
+	}
+
 	writeJSON(writer, commonResp{Data: "OK"})
 }
 
@@ -2599,8 +2650,14 @@ func deleteFile(writer http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 记录是否为目录（删除前检查）
+	isDir := false
+	if info, err := os.Stat(absPath); err == nil {
+		isDir = info.IsDir()
+	}
+
 	// 删除关联的 ASS 弹幕文件
-	if info, err := os.Stat(absPath); err == nil && !info.IsDir() {
+	if !isDir {
 		assPath := strings.TrimSuffix(absPath, filepath.Ext(absPath)) + ".ass"
 		if _, err := os.Stat(assPath); err == nil {
 			os.Remove(assPath)
@@ -2610,6 +2667,20 @@ func deleteFile(writer http.ResponseWriter, r *http.Request) {
 	if err := os.RemoveAll(absPath); err != nil {
 		writeJSON(writer, commonResp{ErrNo: 500, ErrMsg: "删除失败: " + translateOSError(err)})
 		return
+	}
+
+	// 清除上传标记
+	if isDir {
+		// 目录：清除该目录下所有文件的上传标记
+		allMarks, _ := metadata.GetStore().GetAll(r.Context(), metadata.NamespaceUploaded)
+		prefix := path + "/" // key 统一用正斜杠
+		for key := range allMarks {
+			if strings.HasPrefix(key, prefix) {
+				metadata.GetStore().Delete(r.Context(), metadata.NamespaceUploaded, key)
+			}
+		}
+	} else {
+		metadata.GetStore().Delete(r.Context(), metadata.NamespaceUploaded, path)
 	}
 
 	writeJSON(writer, commonResp{Data: "OK"})
@@ -2698,6 +2769,28 @@ func batchRenameFiles(writer http.ResponseWriter, r *http.Request) {
 					os.Rename(oldAss, newAss)
 				}
 			}
+
+			// 迁移上传标记（key 统一用正斜杠）
+			oldRel := path
+			newRelPath, _ := filepath.Rel(base, newAbsPath)
+			newRel := filepath.ToSlash(newRelPath)
+			if info.IsDir() {
+				allMarks, _ := metadata.GetStore().GetAll(r.Context(), metadata.NamespaceUploaded)
+				oldPrefix := oldRel + "/"
+				for key, val := range allMarks {
+					if strings.HasPrefix(key, oldPrefix) {
+						suffix := key[len(oldPrefix):]
+						newKey := newRel + "/" + suffix
+						metadata.GetStore().Set(r.Context(), metadata.NamespaceUploaded, newKey, val)
+						metadata.GetStore().Delete(r.Context(), metadata.NamespaceUploaded, key)
+					}
+				}
+			} else {
+				if val, err := metadata.GetStore().Get(r.Context(), metadata.NamespaceUploaded, oldRel); err == nil {
+					metadata.GetStore().Set(r.Context(), metadata.NamespaceUploaded, newRel, val)
+					metadata.GetStore().Delete(r.Context(), metadata.NamespaceUploaded, oldRel)
+				}
+			}
 		}
 	}
 
@@ -2734,8 +2827,14 @@ func batchDeleteFiles(writer http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		// 记录是否为目录（删除前检查）
+		isDir := false
+		if info, err := os.Stat(absPath); err == nil {
+			isDir = info.IsDir()
+		}
+
 		// 删除关联的 ASS 弹幕文件
-		if info, err := os.Stat(absPath); err == nil && !info.IsDir() {
+		if !isDir {
 			assPath := strings.TrimSuffix(absPath, filepath.Ext(absPath)) + ".ass"
 			if _, err := os.Stat(assPath); err == nil {
 				os.Remove(assPath)
@@ -2745,6 +2844,18 @@ func batchDeleteFiles(writer http.ResponseWriter, r *http.Request) {
 		if err := os.RemoveAll(absPath); err != nil {
 			results = append(results, Result{Path: path, Success: false, Message: translateOSError(err)})
 		} else {
+			// 清除上传标记
+			if isDir {
+				allMarks, _ := metadata.GetStore().GetAll(r.Context(), metadata.NamespaceUploaded)
+				prefix := path + "/" // key 统一用正斜杠
+				for key := range allMarks {
+					if strings.HasPrefix(key, prefix) {
+						metadata.GetStore().Delete(r.Context(), metadata.NamespaceUploaded, key)
+					}
+				}
+			} else {
+				metadata.GetStore().Delete(r.Context(), metadata.NamespaceUploaded, path)
+			}
 			results = append(results, Result{Path: path, Success: true, Message: "成功"})
 		}
 	}

@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 )
 
 // encodePath 对路径的每个段分别编码，保留 / 分隔符
@@ -24,6 +26,7 @@ func encodePath(path string) string {
 // Client OpenList API 客户端
 type Client struct {
 	baseURL    string
+	mu         sync.RWMutex // 保护 token/username/password 的并发访问
 	token      string
 	username   string // 用于 token 刷新
 	password   string // 用于 token 刷新
@@ -43,40 +46,75 @@ func NewClient(baseURL, token string) *Client {
 
 // SetToken 设置 API Token
 func (c *Client) SetToken(token string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.token = token
 }
 
-// GetToken 获取当前 API Token
+// GetCurrentToken 获取当前 API Token
 func (c *Client) GetCurrentToken() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.token
 }
 
 // SetCredentials 设置用户名密码（用于 token 自动刷新）
 func (c *Client) SetCredentials(username, password string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.username = username
 	c.password = password
 }
 
+// getTokenForRequest 获取用于请求的 token 副本（内部使用）
+func (c *Client) getTokenForRequest() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.token
+}
+
 // refreshToken 刷新 token
 func (c *Client) refreshToken(ctx context.Context) error {
-	if c.username == "" || c.password == "" {
+	c.mu.RLock()
+	username := c.username
+	password := c.password
+	c.mu.RUnlock()
+
+	if username == "" || password == "" {
 		return fmt.Errorf("无法刷新 token: 未配置用户名密码")
 	}
-	newToken, err := c.GetToken(ctx, c.username, c.password)
+	newToken, err := c.GetToken(ctx, username, password)
 	if err != nil {
 		return fmt.Errorf("刷新 token 失败: %w", err)
 	}
-	c.token = newToken
+	c.SetToken(newToken)
 	return nil
 }
 
-// isAuthError 判断是否为认证错误（HTTP 401/403）
+// APIError 表示 OpenList API 返回的结构化错误
+// 用于在 isAuthError 中识别认证失败（code 401/403）
+type APIError struct {
+	Code    int
+	Message string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("API 错误 (code %d): %s", e.Code, e.Message)
+}
+
+// isAuthError 判断是否为认证错误
+// 匹配 HTTP 状态码 401/403 或 OpenList JSON code 401/403
 func isAuthError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// 检查结构化 API 错误
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Code == 401 || apiErr.Code == 403
+	}
+	// 兜底：检查错误文本中的 HTTP 状态码
 	s := err.Error()
-	// 匹配 "HTTP 401" 或 "HTTP 403" 格式，避免误匹配其他包含 401/403 的字符串
 	return strings.Contains(s, "HTTP 401") || strings.Contains(s, "HTTP 403")
 }
 
@@ -123,7 +161,7 @@ func (c *Client) doUpload(ctx context.Context, localPath, remotePath string, onP
 		return fmt.Errorf("创建请求失败: %w", err)
 	}
 
-	req.Header.Set("Authorization", c.token)
+	req.Header.Set("Authorization", c.getTokenForRequest())
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("Content-Length", fmt.Sprintf("%d", totalSize))
 	// 对路径的每个段分别编码，保留 / 分隔符
@@ -148,12 +186,10 @@ func (c *Client) doUpload(ctx context.Context, localPath, remotePath string, onP
 		Message string `json:"message"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		// 响应不是 JSON 格式，可能是空响应（某些 API 成功时返回空 body）
-		// 由于 HTTP 状态码是 200，视为成功
-		return nil
+		return fmt.Errorf("解析上传响应失败: %w", err)
 	}
 	if result.Code != 200 {
-		return fmt.Errorf("上传失败: %s", result.Message)
+		return fmt.Errorf("上传失败: %w", &APIError{Code: result.Code, Message: result.Message})
 	}
 
 	return nil
@@ -176,7 +212,7 @@ func (c *Client) ListStorages(ctx context.Context) ([]StorageInfo, error) {
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Authorization", c.token)
+		req.Header.Set("Authorization", c.getTokenForRequest())
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
@@ -197,7 +233,7 @@ func (c *Client) ListStorages(ctx context.Context) ([]StorageInfo, error) {
 		}
 
 		if result.Code != 200 {
-			return fmt.Errorf("API 错误: %s", result.Message)
+			return fmt.Errorf("API 错误: %w", &APIError{Code: result.Code, Message: result.Message})
 		}
 
 		storages = result.Data.Content
@@ -218,7 +254,7 @@ func (c *Client) CheckStorageHealth(ctx context.Context, storageName string) err
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Authorization", c.token)
+		req.Header.Set("Authorization", c.getTokenForRequest())
 		req.Header.Set("Content-Type", "application/json")
 
 		resp, err := c.httpClient.Do(req)
@@ -237,7 +273,7 @@ func (c *Client) CheckStorageHealth(ctx context.Context, storageName string) err
 		}
 
 		if result.Code != 200 {
-			return fmt.Errorf("存储不可用: %s", result.Message)
+			return fmt.Errorf("存储不可用: %w", &APIError{Code: result.Code, Message: result.Message})
 		}
 
 		return nil
@@ -276,7 +312,7 @@ func (c *Client) GetToken(ctx context.Context, username, password string) (strin
 	}
 
 	if result.Code != 200 {
-		return "", fmt.Errorf("登录失败: %s", result.Message)
+		return "", fmt.Errorf("登录失败: %w", &APIError{Code: result.Code, Message: result.Message})
 	}
 
 	return result.Data.Token, nil
@@ -293,7 +329,7 @@ func (c *Client) Mkdir(ctx context.Context, remotePath string) error {
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Authorization", c.token)
+		req.Header.Set("Authorization", c.getTokenForRequest())
 		req.Header.Set("Content-Type", "application/json")
 
 		resp, err := c.httpClient.Do(req)
@@ -313,7 +349,7 @@ func (c *Client) Mkdir(ctx context.Context, remotePath string) error {
 
 		// 目录已存在也算成功
 		if result.Code != 200 && result.Message != "file exists" {
-			return fmt.Errorf("创建目录失败: %s", result.Message)
+			return fmt.Errorf("创建目录失败: %w", &APIError{Code: result.Code, Message: result.Message})
 		}
 
 		return nil

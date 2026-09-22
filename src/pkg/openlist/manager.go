@@ -34,6 +34,19 @@ func SetGlobalManager(m *Manager) {
 	globalManager = m
 }
 
+// ClearGlobalManagerIf 仅当全局管理器等于 expected 时才清除（CAS 语义）
+// 用于异步清理路径，避免误清已被新实例替换的管理器
+// 返回是否成功清除
+func ClearGlobalManagerIf(expected *Manager) bool {
+	globalMu.Lock()
+	defer globalMu.Unlock()
+	if globalManager == expected {
+		globalManager = nil
+		return true
+	}
+	return false
+}
+
 // GetGlobalManager 获取全局 OpenList 管理器
 func GetGlobalManager() *Manager {
 	globalMu.RLock()
@@ -197,9 +210,14 @@ func (m *Manager) saveInitialCredentials(logFile string) {
 		return
 	}
 
-	// 如果已经配置了用户名密码，跳过
+	// 如果已经配置了用户名密码，验证有效性
 	if config.OpenList.Username != "" && config.OpenList.Password != "" {
-		return
+		// 用现有凭据尝试登录，验证是否有效
+		testClient := NewClient(m.apiEndpoint, "")
+		if _, err := testClient.GetToken(context.Background(), config.OpenList.Username, config.OpenList.Password); err == nil {
+			return // 凭据有效，无需更新
+		}
+		// 凭据无效（如占位值 root/root），继续从日志读取真实密码
 	}
 
 	// 读取日志文件查找初始密码
@@ -226,10 +244,20 @@ func (m *Manager) saveInitialCredentials(logFile string) {
 		return
 	}
 
+	// 验证密码有效性：日志是追加模式，旧密码可能已被用户修改
+	// 只有实际能登录时才保存
+	client := NewClient(m.apiEndpoint, "")
+	if _, err := client.GetToken(context.Background(), "admin", initialPassword); err != nil {
+		logrus.WithError(err).Debug("初始密码验证失败，跳过保存（可能已被修改）")
+		return
+	}
+
 	// 保存到配置
-	config.OpenList.Username = "admin"
-	config.OpenList.Password = initialPassword
-	if err := config.Marshal(); err != nil {
+	if _, err := configs.UpdateWithRetry(func(c *configs.Config) error {
+		c.OpenList.Username = "admin"
+		c.OpenList.Password = initialPassword
+		return nil
+	}, 3, 10*time.Millisecond); err != nil {
 		logrus.WithError(err).Warn("保存 OpenList 初始密码到配置文件失败")
 	} else {
 		logrus.Info("OpenList 首次启动，初始密码已保存到配置文件")
@@ -251,10 +279,16 @@ func (m *Manager) watchProcess() {
 
 	select {
 	case <-m.stopCh:
-		// 正常停止
+		// 正常停止（stopInternal 已负责关闭 m.logFile）
 	default:
-		// 异常退出
+		// 异常退出：关闭日志文件句柄，避免 fd 泄漏
 		if wasRunning {
+			m.mu.Lock()
+			if m.logFile != nil {
+				m.logFile.Close()
+				m.logFile = nil
+			}
+			m.mu.Unlock()
 			logrus.WithError(err).Warn("OpenList 进程异常退出")
 		}
 	}
@@ -322,6 +356,7 @@ func (m *Manager) GetDataPath() string {
 
 // GetClient 获取已认证的 API 客户端
 // 如果提供了 token，直接使用；否则使用用户名密码登录获取 token
+// token 有效性由 withRetry 在实际 API 调用时自动处理（401/403 时自动刷新）
 func (m *Manager) GetClient(ctx context.Context, token, username, password string) (*Client, error) {
 	client := NewClient(m.apiEndpoint, "")
 
@@ -330,23 +365,10 @@ func (m *Manager) GetClient(ctx context.Context, token, username, password strin
 		client.SetCredentials(username, password)
 	}
 
-	// 有 token 时，验证其有效性
+	// 有 token 时直接使用，不预验证（避免需要管理员权限的 API 调用）
+	// withRetry 会在实际调用遇到 401/403 时自动用密码刷新 token
 	if token != "" {
 		client.SetToken(token)
-		// 尝试用 token 调用一个轻量 API 验证有效性
-		if _, err := client.ListStorages(ctx); err != nil {
-			// token 无效，尝试用密码重新登录
-			if username != "" && password != "" {
-				logrus.Warn("配置的 OpenList token 无效，尝试用用户名密码重新登录")
-				newToken, loginErr := client.GetToken(ctx, username, password)
-				if loginErr != nil {
-					return nil, fmt.Errorf("OpenList token 无效且登录失败: %w", loginErr)
-				}
-				client.SetToken(newToken)
-				return client, nil
-			}
-			return nil, fmt.Errorf("OpenList token 无效且未配置用户名密码")
-		}
 		return client, nil
 	}
 

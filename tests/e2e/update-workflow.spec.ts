@@ -254,9 +254,13 @@ test.describe('优雅更新逻辑测试', () => {
     const response = await request.get('/api/update/launcher');
     expect(response.ok()).toBeTruthy();
 
-    const data = await response.json();
-    // 测试环境应该没有活跃录制
-    expect(data.active_recordings).toBe(0);
+    // 测试环境应该没有活跃录制。前序 spec 清理房间后录制器回收存在短暂延迟，
+    // 使用轮询等待其归零，避免时序相关的偶发失败。
+    await expect.poll(async () => {
+      const res = await request.get('/api/update/launcher');
+      const d = await res.json();
+      return d.active_recordings;
+    }, { timeout: 10000 }).toBe(0);
   });
 
   test('更新状态不影响其他核心 API', async ({ request }) => {

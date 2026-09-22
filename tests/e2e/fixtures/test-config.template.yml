@@ -18,7 +18,7 @@ feature:
 # '{{ .Live.GetPlatformCNName }}/{{ .HostName | filenameFilter }}/[{{ now | date "2006-01-02 15-04-05"}}][{{ .HostName | filenameFilter }}][{{ .RoomName | filenameFilter }}].flv'
 # ./平台名称/主播名字/[时间戳][主播名字][房间名字].flv
 # https://github.com/bililive-go/bililive-go/wiki/More-Tips
-out_put_tmpl: '{{.RoomName}}-{{.HostName}}/{{.StartTime}}'
+out_put_tmpl: '{{.RoomName}}-{{.HostName}}/{{ now | date "2006-01-02 15-04-05" }}.flv'
 video_split_strategies:
   on_room_name_changed: false
   max_duration: 0s
@@ -43,7 +43,7 @@ on_record_finished:
   cloud_upload:
     enable: false
     storage_name: ""
-    upload_path_tmpl: /录播归档/{{ .Platform }}/{{ .HostName }}/{{ .RoomName }}-{{ now | date "2006-01-02" }}.{{ .Ext }}
+    upload_path_tmpl: /录播归档/{{ .Platform }}/{{ .HostName }}/{{ .FileName }}
     delete_after_upload: false
   upload_timing: after_process
 timeout_in_us: 60000000

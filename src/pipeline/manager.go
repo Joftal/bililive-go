@@ -3,14 +3,21 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/bililive-go/bililive-go/src/configs"
 	"github.com/bililive-go/bililive-go/src/instance"
 	"github.com/bililive-go/bililive-go/src/live"
+	"github.com/bililive-go/bililive-go/src/notify"
 	"github.com/bililive-go/bililive-go/src/pkg/events"
 	"github.com/bililive-go/bililive-go/src/pkg/livelogger"
 	bilisentry "github.com/bililive-go/bililive-go/src/pkg/sentry"
+	"github.com/bililive-go/bililive-go/src/types"
 	"github.com/sirupsen/logrus"
 )
 
@@ -23,6 +30,7 @@ type Manager struct {
 	executor      *Executor
 	config        *ManagerConfig
 	runningTasks  map[int64]context.CancelFunc
+	taskCallbacks map[int64]func(*PipelineTask) // 按 task.ID 索引的完成回调（不经过持久化）
 	mu            sync.RWMutex
 	wg            sync.WaitGroup
 	eventDispatch events.Dispatcher
@@ -64,6 +72,7 @@ func NewManager(ctx context.Context, store Store, config *ManagerConfig, dispatc
 		executor:      NewExecutor(logrus.StandardLogger()),
 		config:        config,
 		runningTasks:  make(map[int64]context.CancelFunc),
+		taskCallbacks: make(map[int64]func(*PipelineTask)),
 		eventDispatch: dispatcher,
 	}
 
@@ -201,11 +210,21 @@ func (m *Manager) executeTask(ctx context.Context, task *PipelineTask) {
 		WorkDir: "", // 后续可以从配置获取
 	}
 
-	// 执行管道
+	// 执行管道（从 startStage 开始，支持从指定阶段重试）
+	startStage := task.CurrentStage
+
+	// 保留目标阶段之前的结果（用于合并）
+	var preservedResults []StageResult
+	if startStage > 0 && len(task.StageResults) >= startStage {
+		preservedResults = make([]StageResult, startStage)
+		copy(preservedResults, task.StageResults[:startStage])
+	}
+
 	results, err := m.executor.Execute(
 		pipelineCtx,
 		task.PipelineConfig,
 		task.CurrentFiles,
+		startStage,
 		func(stageIndex int, stageName string, status StageStatus) {
 			// 更新任务进度
 			task.CurrentStage = stageIndex
@@ -215,10 +234,26 @@ func (m *Manager) executeTask(ctx context.Context, task *PipelineTask) {
 			}
 			m.broadcastTaskUpdate(task)
 		},
+		// 阶段完成后持久化结果，确保崩溃恢复时阶段记录完整
+		func(stageIndex int, result StageResult) {
+			task.CurrentFiles = result.OutputFiles
+			// 追加/更新 StageResults，让崩溃恢复后 preservedResults 合并条件成立
+			for len(task.StageResults) <= stageIndex {
+				task.StageResults = append(task.StageResults, StageResult{})
+			}
+			task.StageResults[stageIndex] = result
+			if err := m.store.UpdateTask(ctx, task); err != nil {
+				logrus.WithError(err).Warn("failed to persist stage result")
+			}
+		},
 	)
 
-	// 保存阶段结果
-	task.StageResults = results
+	// 合并：保留之前的结果 + 新执行的结果
+	if preservedResults != nil {
+		task.StageResults = append(preservedResults, results...)
+	} else {
+		task.StageResults = results
+	}
 
 	if err != nil {
 		if ctx.Err() == context.Canceled {
@@ -238,6 +273,9 @@ func (m *Manager) executeTask(ctx context.Context, task *PipelineTask) {
 		logrus.WithField("task_id", task.ID).Info("pipeline task completed successfully")
 	}
 
+	// 保存最后阶段输出的快照（清理前），用于回调提取上传文件详情
+	task.LastStageFiles = pipelineCtx.LastStageFiles
+
 	// 更新任务状态
 	if err := m.store.UpdateTask(m.ctx, task); err != nil {
 		logrus.WithError(err).Error("failed to update pipeline task status after execution")
@@ -245,6 +283,16 @@ func (m *Manager) executeTask(ctx context.Context, task *PipelineTask) {
 
 	// 广播任务状态变化
 	m.broadcastTaskUpdate(task)
+
+	// 原子地取出并删除回调，确保每个任务的回调至多触发一次
+	// 避免 executeTask 和 CancelTask 并发时双发回调
+	m.mu.Lock()
+	callback := m.taskCallbacks[task.ID]
+	delete(m.taskCallbacks, task.ID)
+	m.mu.Unlock()
+	if callback != nil {
+		callback(task)
+	}
 }
 
 // broadcastTaskUpdate 广播任务更新事件
@@ -254,11 +302,36 @@ func (m *Manager) broadcastTaskUpdate(task *PipelineTask) {
 	}
 }
 
+// FileInfoToDetails 将 FileInfo 切片转换为 RecordingFileDetail 切片
+// 使用 FileInfo 中预存的 Size，无需再次 stat 文件
+// 仅包含视频和其他类型文件，排除封面（封面不在录制摘要中展示）
+func FileInfoToDetails(files []FileInfo) []notify.RecordingFileDetail {
+	details := make([]notify.RecordingFileDetail, 0, len(files))
+	for _, f := range files {
+		if f.Size > 0 && f.Type != FileTypeCover {
+			details = append(details, notify.RecordingFileDetail{
+				Name: filepath.Base(f.Path),
+				Size: f.Size,
+			})
+		}
+	}
+	return details
+}
+
 // EnqueueTask 添加任务到队列
-func (m *Manager) EnqueueTask(task *PipelineTask) error {
+// onTaskComplete: 任务完成回调（可选），在任务对调度器可见前注册
+func (m *Manager) EnqueueTask(task *PipelineTask, onTaskComplete func(*PipelineTask)) error {
+	// 持锁覆盖 CreateTask + 回调注册，阻塞 pollLoop 的 scheduleNextTasks（需 RLock）
+	// 确保任务对调度器可见时回调已就绪
+	m.mu.Lock()
 	if err := m.store.CreateTask(m.ctx, task); err != nil {
+		m.mu.Unlock()
 		return fmt.Errorf("failed to create pipeline task: %w", err)
 	}
+	if onTaskComplete != nil {
+		m.taskCallbacks[task.ID] = onTaskComplete
+	}
+	m.mu.Unlock()
 
 	logrus.WithFields(logrus.Fields{
 		"task_id":       task.ID,
@@ -277,10 +350,12 @@ func (m *Manager) EnqueueTask(task *PipelineTask) error {
 
 // EnqueueRecordingTask 创建并入队录制完成后的处理任务
 // 这是 recorder.go 调用的主要入口
+// onTaskComplete: 任务完成回调（可选），用于通知 recorder 任务结束
 func (m *Manager) EnqueueRecordingTask(
 	info *live.Info,
 	pipelineConfig *PipelineConfig,
 	outputFiles []string,
+	onTaskComplete func(task *PipelineTask),
 ) error {
 	// 构建文件信息列表
 	files := make([]FileInfo, len(outputFiles))
@@ -291,7 +366,8 @@ func (m *Manager) EnqueueRecordingTask(
 	// 创建任务
 	task := NewPipelineTask(NewRecordInfo(info), pipelineConfig, files)
 
-	return m.EnqueueTask(task)
+	// 入队并注册回调（EnqueueTask 内部在异步调度前完成注册，避免竞态窗口）
+	return m.EnqueueTask(task, onTaskComplete)
 }
 
 // CancelTask 取消任务
@@ -316,6 +392,15 @@ func (m *Manager) CancelTask(taskID int64) error {
 			return err
 		}
 		m.broadcastTaskUpdate(task)
+
+		// 原子地取出并删除回调，避免与 executeTask 并发时双发
+		m.mu.Lock()
+		callback := m.taskCallbacks[taskID]
+		delete(m.taskCallbacks, taskID)
+		m.mu.Unlock()
+		if callback != nil {
+			callback(task)
+		}
 	}
 
 	return nil
@@ -332,8 +417,16 @@ func (m *Manager) RetryTask(taskID int64) error {
 		return fmt.Errorf("task cannot be retried")
 	}
 
-	if task.Status != PipelineStatusFailed && task.Status != PipelineStatusCancelled {
-		return fmt.Errorf("only failed or cancelled tasks can be retried")
+	// 允许 Failed/Cancelled/Completed 状态
+	if task.Status != PipelineStatusFailed && task.Status != PipelineStatusCancelled && task.Status != PipelineStatusCompleted {
+		return fmt.Errorf("only failed, cancelled or completed tasks can be retried")
+	}
+
+	// 校验初始文件存在（Completed 任务的文件可能已被 deleteMarkedFiles 清理）
+	for _, f := range task.InitialFiles {
+		if _, err := os.Stat(f.Path); os.IsNotExist(err) {
+			return fmt.Errorf("initial file not found, cannot retry (may have been deleted after upload): %s", f.Path)
+		}
 	}
 
 	// 重置任务状态
@@ -342,8 +435,125 @@ func (m *Manager) RetryTask(taskID int64) error {
 	task.CompletedAt = nil
 	task.ErrorMessage = ""
 	task.CurrentStage = 0
+	task.CurrentFiles = task.InitialFiles // 重置为初始文件，从头开始重试
 	task.StageResults = nil
 	task.Progress = 0
+
+	if err := m.store.UpdateTask(m.ctx, task); err != nil {
+		return err
+	}
+
+	m.broadcastTaskUpdate(task)
+
+	// 立即尝试调度
+	bilisentry.Go(func() { m.scheduleNextTasks() })
+
+	return nil
+}
+
+// RetryTaskFromStage 从指定阶段开始重试任务
+// 允许 Failed/Cancelled/Completed 状态的任务
+// stageName: 要从哪个阶段开始重试（如 "cloud_upload"）
+func (m *Manager) RetryTaskFromStage(taskID int64, stageName string) error {
+	task, err := m.store.GetTask(m.ctx, taskID)
+	if err != nil {
+		return err
+	}
+
+	if !task.CanRetry {
+		return fmt.Errorf("task cannot be retried")
+	}
+
+	// 允许 Failed/Cancelled/Completed 状态
+	if task.Status != PipelineStatusFailed &&
+		task.Status != PipelineStatusCancelled &&
+		task.Status != PipelineStatusCompleted {
+		return fmt.Errorf("only failed, cancelled or completed tasks can be retried")
+	}
+
+	// 找到目标阶段在启用阶段中的索引
+	targetStageIndex := -1
+	stageIndex := 0
+	for _, stageCfg := range task.PipelineConfig.Stages {
+		if !stageCfg.IsEnabled() {
+			continue
+		}
+		if stageCfg.Name == stageName {
+			targetStageIndex = stageIndex
+			break
+		}
+		stageIndex++
+	}
+	if targetStageIndex == -1 {
+		return fmt.Errorf("stage %s not found in pipeline", stageName)
+	}
+
+	// 校验：目标阶段之前的所有阶段必须已完成
+	if targetStageIndex > 0 {
+		for i := 0; i < targetStageIndex; i++ {
+			if i >= len(task.StageResults) {
+				return fmt.Errorf("stage %d has not been executed, cannot retry from stage %s", i, stageName)
+			}
+			if task.StageResults[i].Status != StageStatusCompleted {
+				return fmt.Errorf("stage %d (%s) is not completed (status: %s), cannot retry from stage %s",
+					i, task.StageResults[i].StageName, task.StageResults[i].Status, stageName)
+			}
+		}
+	}
+
+	// 获取目标阶段的输入文件
+	var inputFiles []FileInfo
+	if targetStageIndex < len(task.StageResults) {
+		// 从已有的 StageResult 中取输入文件
+		inputFiles = task.StageResults[targetStageIndex].InputFiles
+	} else if targetStageIndex > 0 && targetStageIndex-1 < len(task.StageResults) {
+		// 使用上一阶段的输出文件
+		inputFiles = task.StageResults[targetStageIndex-1].OutputFiles
+	} else if targetStageIndex == 0 {
+		// 从头开始，使用初始文件
+		inputFiles = task.InitialFiles
+	}
+
+	// 过滤已清理的中间文件，保留仍在磁盘上的文件
+	// deleteMarkedFiles 仅在管道全部成功后执行，失败/取消时文件仍在磁盘但带有标记
+	// 因此需要结合磁盘实际存在性判断：标记但仍在 → 保留（管道未清理），标记且已删 → 跳过
+	var activeFiles []FileInfo
+	for _, f := range inputFiles {
+		isDeletable := f.Deletable
+		isUploaded := false
+		if f.Metadata != nil {
+			if uploaded, ok := f.Metadata["uploaded"].(bool); ok && uploaded {
+				isUploaded = true
+			}
+		}
+
+		if _, err := os.Stat(f.Path); os.IsNotExist(err) {
+			if isDeletable || isUploaded {
+				continue // 已被 deleteMarkedFiles 正常清理，跳过
+			}
+			return fmt.Errorf("input file not found, cannot retry: %s", f.Path)
+		}
+		activeFiles = append(activeFiles, f)
+	}
+	inputFiles = activeFiles
+
+	// 校验输入文件不为空
+	if len(inputFiles) == 0 {
+		return fmt.Errorf("no input files available for stage %s, cannot retry", stageName)
+	}
+
+	// 重置任务状态
+	task.Status = PipelineStatusPending
+	task.StartedAt = nil
+	task.CompletedAt = nil
+	task.ErrorMessage = ""
+	task.CurrentStage = targetStageIndex
+	task.CurrentFiles = inputFiles
+	// 保留目标阶段之前的结果，清除目标阶段及之后的结果
+	if targetStageIndex < len(task.StageResults) {
+		task.StageResults = task.StageResults[:targetStageIndex]
+	}
+	task.UpdateProgress()
 
 	if err := m.store.UpdateTask(m.ctx, task); err != nil {
 		return err
@@ -430,6 +640,112 @@ type ManagerStats struct {
 	CompletedCount int `json:"completed_count"`
 	FailedCount    int `json:"failed_count"`
 	CancelledCount int `json:"cancelled_count"`
+}
+
+// EnqueueUploadTask 创建手动上传的 Pipeline 任务并入队
+// 行为与自动上传（CloudUploadStage）完全一致：使用相同的路径模板、配置选项
+// 每个文件创建一个独立的单阶段 cloud_upload 任务
+// absPaths: 已校验的绝对路径列表（调用方应先通过 getSafePath 校验）
+func (m *Manager) EnqueueUploadTask(absPaths []string) (enqueued int, skipped []string, taskIDs []int64, err error) {
+	config := configs.GetCurrentConfig()
+	if config == nil {
+		return 0, nil, nil, fmt.Errorf("配置未初始化")
+	}
+
+	cu := config.OnRecordFinished.CloudUpload
+	if !cu.Enable {
+		return 0, nil, nil, fmt.Errorf("云上传功能未启用，请先在设置中开启")
+	}
+	if cu.StorageName == "" {
+		return 0, nil, nil, fmt.Errorf("未配置存储名称")
+	}
+
+	// 构建单阶段 cloud_upload PipelineConfig，与 ConvertLegacyConfig 一致
+	uploadConfig := &PipelineConfig{
+		Stages: []StageConfig{
+			{
+				Name: StageNameCloudUpload,
+				Options: map[string]any{
+					OptionStorage:        cu.StorageName,
+					OptionPathTemplate:   cu.UploadPathTmpl,
+					OptionDeleteAfter:    cu.DeleteAfterUpload,
+					OptionDeleteAllAfter: cu.DeleteAllAfterUpload,
+					OptionUploadTiming:   "after_process", // 手动上传无后续处理阶段，始终允许删除标记（不继承全局 upload_timing）
+					OptionFileTypes:      []string{string(FileTypeVideo), string(FileTypeCover)},
+					OptionUploadSubtitles: cu.UploadSubtitles,
+				},
+			},
+		},
+	}
+
+	outputPath, _ := filepath.Abs(config.OutPutPath)
+	skipped = []string{}
+
+	for _, absPath := range absPaths {
+		// 检查文件存在
+		info, statErr := os.Stat(absPath)
+		if statErr != nil {
+			skipped = append(skipped, filepath.Base(absPath)+" - 文件不存在或无法访问")
+			continue
+		}
+		if info.IsDir() {
+			skipped = append(skipped, filepath.Base(absPath)+" - 不支持上传文件夹")
+			continue
+		}
+
+		// 从相对路径推断 RecordInfo（用于上传路径模板渲染）
+		relPath, _ := filepath.Rel(outputPath, absPath)
+		platform, hostName := inferUploadPathInfo(relPath)
+
+		recordInfo := RecordInfo{
+			LiveID:      types.LiveID(ManualUploadLiveID),
+			Platform:    platform,              // 用于上传路径模板：{{ .Platform }}
+			HostName:    hostName,              // 用于上传路径模板：{{ .HostName }}
+			RoomName:    "",                    // 手动上传无房间名，不影响路径模板
+			DisplayName: filepath.Base(absPath), // 任务列表展示文件名
+			StartTime:   info.ModTime(),
+		}
+
+		files := []FileInfo{NewVideoFileInfo(absPath)}
+		task := NewPipelineTask(recordInfo, uploadConfig, files)
+
+		if enqueueErr := m.EnqueueTask(task, nil); enqueueErr != nil {
+			skipped = append(skipped, filepath.Base(absPath)+" - 入队失败: "+enqueueErr.Error())
+			continue
+		}
+
+		enqueued++
+		taskIDs = append(taskIDs, task.ID)
+	}
+
+	return enqueued, skipped, taskIDs, nil
+}
+
+// bracketPattern 匹配文件名中的 [xxx] 模式
+var bracketPattern = regexp.MustCompile(`\[([^\]]*)\]`)
+
+// inferUploadPathInfo 从文件相对路径推断平台和主播名
+// 两级策略：优先从文件名解析（[date][HostName][RoomName].flv），回退到目录结构推断
+func inferUploadPathInfo(relPath string) (platform, hostName string) {
+	slashPath := filepath.ToSlash(relPath)
+
+	// 策略 1：从文件名解析 HostName（文件名格式通常是 [date][HostName][RoomName].flv）
+	fileName := filepath.Base(slashPath)
+	brackets := bracketPattern.FindAllStringSubmatch(fileName, -1)
+	if len(brackets) >= 2 {
+		hostName = brackets[1][1] // 第二个方括号通常是主播名
+	}
+
+	// 策略 2：从目录结构推断 Platform，以及作为 HostName 的兜底
+	parts := strings.Split(slashPath, "/")
+	if len(parts) >= 2 {
+		platform = parts[0]
+		if hostName == "" {
+			hostName = parts[1]
+		}
+	}
+
+	return platform, hostName
 }
 
 // GetManager 从实例获取管道管理器

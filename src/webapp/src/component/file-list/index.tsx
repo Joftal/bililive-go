@@ -11,7 +11,9 @@ import {
     // @ts-ignore
     EditOutlined,
     // @ts-ignore
-    DeleteOutlined
+    DeleteOutlined,
+    // @ts-ignore
+    CloudUploadOutlined
 } from "@ant-design/icons";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import Utils from "../../utils/common";
@@ -479,6 +481,7 @@ type CurrentFolderFile = {
     last_modified: number;
     size: number;
     subtitle_file?: string;
+    uploaded?: boolean;
 }
 
 const FileList: React.FC = () => {
@@ -778,6 +781,71 @@ const FileList: React.FC = () => {
                 }
             })
             .catch(err => message.error("删除失败: " + err));
+    };
+
+    const handleUpload = (record: CurrentFolderFile, e?: React.MouseEvent) => {
+        if (e) e.stopPropagation();
+        let fullPath = record.name;
+        if (pathParam) {
+            fullPath = pathParam + "/" + record.name;
+        }
+
+        message.loading({ content: `正在上传 ${record.name}...`, key: "upload" });
+        api.uploadFile(fullPath)
+            .then((rsp: any) => {
+                if (rsp.data) {
+                    const data = rsp.data;
+                    if (data.enqueued > 0) {
+                        message.success({ content: `已入队上传任务: ${record.name}`, key: "upload" });
+                    } else if (data.skipped && data.skipped.length > 0) {
+                        message.error({ content: data.skipped[0] || "上传失败", key: "upload" });
+                    } else {
+                        message.error({ content: rsp.err_msg || "上传失败", key: "upload" });
+                    }
+                } else {
+                    message.error({ content: rsp.err_msg || "上传失败", key: "upload" });
+                }
+            })
+            .catch((err: any) => message.error({ content: "上传失败: " + (err.message || err), key: "upload" }));
+    };
+
+    const handleBatchUpload = () => {
+        if (selectedRowKeys.length === 0) return;
+        const paths = selectedRowKeys.map(key => {
+            const fileName = key.toString();
+            return pathParam ? `${pathParam}/${fileName}` : fileName;
+        });
+
+        message.loading({ content: `正在上传 ${paths.length} 个文件...`, key: "batchUpload" });
+        api.batchUploadFiles(paths)
+            .then((rsp: any) => {
+                if (rsp.data) {
+                    const data = rsp.data;
+                    const enqueued = data.enqueued || 0;
+                    const skipped = data.skipped || [];
+                    const failCount = skipped.length;
+                    if (failCount === 0) {
+                        message.success({ content: `全部 ${enqueued} 个文件已入队上传`, key: "batchUpload" });
+                    } else if (enqueued > 0) {
+                        message.warning({ content: `已入队 ${enqueued} 个，跳过 ${failCount} 个`, key: "batchUpload" });
+                        Modal.info({
+                            title: '部分文件已跳过',
+                            content: (
+                                <div style={{ maxHeight: 300, overflow: 'auto' }}>
+                                    {skipped.map((s: string, i: number) => (
+                                        <div key={i} style={{ fontSize: '12px', color: '#8c8c8c' }}>{s}</div>
+                                    ))}
+                                </div>
+                            ),
+                        });
+                    } else {
+                        message.error({ content: skipped[0] || "批量上传失败", key: "batchUpload" });
+                    }
+                } else {
+                    message.error({ content: rsp.err_msg || "批量上传失败", key: "batchUpload" });
+                }
+            })
+            .catch((err: any) => message.error({ content: "批量上传失败: " + (err.message || err), key: "batchUpload" }));
     };
 
     const handleBatchDelete = () => {
@@ -1153,6 +1221,11 @@ const FileList: React.FC = () => {
                                 无字幕
                             </span>
                         )}
+                        {record.uploaded && (
+                            <span style={{ marginLeft: 6, fontSize: 11, color: '#52c41a', background: '#f6ffed', padding: '1px 6px', borderRadius: 4, cursor: 'default' }}>
+                                已上传
+                            </span>
+                        )}
                     </div>
                 );
             }
@@ -1194,6 +1267,18 @@ const FileList: React.FC = () => {
                     >
                         重命名
                     </Button>
+                    {!record.is_folder && (
+                        <Button
+                            type="link"
+                            size="small"
+                            // @ts-ignore
+                            icon={<CloudUploadOutlined />}
+                            onClick={(e) => handleUpload(record, e)}
+                            className="action-btn"
+                        >
+                            上传
+                        </Button>
+                    )}
                     <Popconfirm
                         title={`确定要删除${record.is_folder ? '文件夹' : '文件'} "${record.name}" 吗？`}
                         onConfirm={() => handleDelete(record)}
@@ -1401,6 +1486,15 @@ const FileList: React.FC = () => {
                                 </Tooltip>
                             );
                         })()}
+                        <Button
+                            size="small"
+                            type="default"
+                            // @ts-ignore
+                            icon={<CloudUploadOutlined />}
+                            onClick={handleBatchUpload}
+                        >
+                            批量上传
+                        </Button>
                         <Popconfirm
                             title={`确定要删除选中的 ${selectedRowKeys.length} 个项目吗？`}
                             onConfirm={handleBatchDelete}

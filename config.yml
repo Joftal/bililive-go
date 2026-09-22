@@ -31,22 +31,39 @@ video_split_strategies:
 on_record_finished:
   convert_to_mp4: false
   delete_flv_after_convert: false
-  #  当 custom_commandline 的值 不为空时，convert_to_mp4 的值会被无视，
-  #  而是在录制结束后直接执行 custom_commandline 中的命令。
-  #  在 custom_commandline 执行结束后，程序还会继续查看 delete_flv_after_convert 的值，
-  #  来判断是否需要删除原始 flv 文件。
-  #  以下是一个在录制结束后将 flv 视频转换为同名 mp4 视频的示例：
-  #  custom_commandline: '{{ .Ffmpeg }} -hide_banner -i "{{ .FileName }}" -c copy "{{ .FileName | trimSuffix (.FileName | ext)}}.mp4"'
   custom_commandline: ""
   fix_flv_at_first: true
   save_cover: false
   cloud_upload:
     enable: false
     storage_name: ""
-    upload_path_tmpl: /录播归档/{{ .Platform }}/{{ .HostName }}/{{ .RoomName }}-{{ now | date "2006-01-02" }}.{{ .Ext }}
+    upload_path_tmpl: /录播归档/{{ .Platform }}/{{ .HostName }}/{{ .FileName }}
     delete_after_upload: false
+    delete_all_after_upload: false
   upload_timing: after_process
+  burn_subtitles: false
+  burn_subtitles_codec: libx264
+  burn_subtitles_crf: "18"
+  burn_subtitles_preset: medium
+  burn_delete_ass: false
+  burn_delete_source: false
 timeout_in_us: 60000000
+danmaku_enable: false
+danmaku:
+  font_size: 36
+  font_name: Microsoft YaHei
+  scroll_area: full
+  scroll_time: 10
+  resolution: 1920x1080
+  outline: 1
+  opacity: 128
+  record_gift: true
+  record_douyu_gift: true
+  record_douyin_gift: true
+  record_guard: true
+  record_super_chat: true
+  guard_position: bottom-left
+  sc_position: bottom-left
 live_rooms:
   # quality参数目前仅B站启用，默认为0
   # (B站)0代表原画PRO(HEVC)优先, 其他数值为原画(AVC)
@@ -106,6 +123,10 @@ notify:
     icon: ""
     # 通知级别（可选）: active/timeSensitive/passive/critical
     level: ""
+  wxpusher:
+    enable: false
+    appToken: ""
+    uids: []
 app_data_path: .appdata
 read_only_tool_folder: ""
 tool_root_folder: ""
@@ -126,6 +147,8 @@ proxy:
 openlist:
   port: 5244
   data_path: ""
+  username: ""
+  password: ""
 update:
   auto_check: true
   check_interval_hours: 6

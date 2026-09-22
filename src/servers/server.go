@@ -153,10 +153,11 @@ func initMux(ctx context.Context) *mux.Router {
 	apiRoute.HandleFunc("/openlist/status", getOpenListStatus).Methods("GET")
 	apiRoute.HandleFunc("/openlist/check-storage", checkOpenListStorageHealth).Methods("GET")
 
-	// Pipeline 任务路由
+	// Pipeline 任务路由 + 手动上传路由
 	inst := instance.GetInstance(ctx)
 	if pm := pipeline.GetManager(inst); pm != nil {
 		RegisterPipelineHandlers(apiRoute, pm)
+		RegisterUploadHandlers(apiRoute, pm)
 	}
 
 	// OSRP 开放直播录制协议路由

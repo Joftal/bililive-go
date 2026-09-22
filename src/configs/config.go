@@ -354,6 +354,7 @@ type CloudUpload struct {
 	UploadPathTmpl      string   `yaml:"upload_path_tmpl" json:"upload_path_tmpl"`                           // 上传路径模板
 	DeleteAfterUpload   bool     `yaml:"delete_after_upload" json:"delete_after_upload"`                     // 上传成功后仅删除已上传的文件
 	DeleteAllAfterUpload bool    `yaml:"delete_all_after_upload" json:"delete_all_after_upload"`             // 上传成功后删除全部文件（含中间产物）
+	UploadSubtitles     bool     `yaml:"upload_subtitles" json:"upload_subtitles"`                           // 是否上传关联的 .ass 弹幕字幕文件
 	AdditionalStorages  []string `yaml:"additional_storages,omitempty" json:"additional_storages,omitempty"` // 额外存储（支持多目标上传）
 }
 
@@ -618,6 +619,36 @@ var updateMu sync.Mutex
 // 当期望版本与实际版本不一致时返回的错误
 var ErrConfigVersionConflict = errors.New("config version conflict")
 
+// AfterUpdateCallback 配置更新后的回调函数类型
+// old 为更新前的配置（可能为 nil），newCfg 为更新后的配置
+type AfterUpdateCallback func(old, newCfg *Config)
+
+// afterUpdateCallbacks 配置更新后的回调列表
+var (
+	afterUpdateCallbacks []AfterUpdateCallback
+	afterUpdateMu        sync.RWMutex
+)
+
+// RegisterAfterUpdate 注册配置更新后的回调
+// 回调在配置更新并持久化完成后同步执行，此时已释放 updateMu 锁
+func RegisterAfterUpdate(cb AfterUpdateCallback) {
+	afterUpdateMu.Lock()
+	defer afterUpdateMu.Unlock()
+	afterUpdateCallbacks = append(afterUpdateCallbacks, cb)
+}
+
+// fireAfterUpdate 触发所有配置更新回调
+func fireAfterUpdate(old, newCfg *Config) {
+	afterUpdateMu.RLock()
+	callbacks := make([]AfterUpdateCallback, len(afterUpdateCallbacks))
+	copy(callbacks, afterUpdateCallbacks)
+	afterUpdateMu.RUnlock()
+
+	for _, cb := range callbacks {
+		cb(old, newCfg)
+	}
+}
+
 func SetCurrentConfig(cfg *Config) {
 	if cfg == nil {
 		// 存储 nil 以保持行为一致
@@ -657,19 +688,19 @@ func UpdateTransient(mutator func(c *Config) error) (*Config, error) {
 }
 
 func updateImpl(mutator func(c *Config) error, persist bool) (*Config, error) {
-	var newCfg *Config
+	var oldCfg, newCfg *Config
 	var updateErr error
 
 	func() {
 		updateMu.Lock()
 		defer updateMu.Unlock()
-		old := GetCurrentConfig()
+		oldCfg = GetCurrentConfig()
 		// 若当前尚未设置配置，则以默认配置为基础
 		var base *Config
-		if old == nil {
+		if oldCfg == nil {
 			base = NewConfig()
 		} else {
-			base = CloneConfigShallow(old)
+			base = CloneConfigShallow(oldCfg)
 		}
 		if err := mutator(base); err != nil {
 			updateErr = err
@@ -678,10 +709,10 @@ func updateImpl(mutator func(c *Config) error, persist bool) (*Config, error) {
 		// 维护派生字段
 		base.RefreshLiveRoomIndexCache()
 		// 版本号自增
-		if old == nil {
+		if oldCfg == nil {
 			base.Version = 1
 		} else {
-			base.Version = old.Version + 1
+			base.Version = oldCfg.Version + 1
 		}
 		newCfg = base
 
@@ -702,6 +733,7 @@ func updateImpl(mutator func(c *Config) error, persist bool) (*Config, error) {
 		return nil, errors.New("config update failed")
 	}
 
+	fireAfterUpdate(oldCfg, newCfg)
 	return newCfg, nil
 }
 
@@ -712,17 +744,17 @@ func UpdateCAS(expectedVersion int64, mutator func(c *Config) error) (*Config, e
 }
 
 func updateCASImpl(expectedVersion int64, mutator func(c *Config) error, persist bool) (*Config, error) {
-	var newCfg *Config
+	var oldCfg, newCfg *Config
 	var updateErr error
 
 	func() {
 		updateMu.Lock()
 		defer updateMu.Unlock()
-		cur := GetCurrentConfig()
+		oldCfg = GetCurrentConfig()
 		// 校验版本
 		var curVersion int64
-		if cur != nil {
-			curVersion = cur.Version
+		if oldCfg != nil {
+			curVersion = oldCfg.Version
 		}
 		if curVersion != expectedVersion {
 			updateErr = ErrConfigVersionConflict
@@ -730,10 +762,10 @@ func updateCASImpl(expectedVersion int64, mutator func(c *Config) error, persist
 		}
 		// 克隆并修改
 		var base *Config
-		if cur == nil {
+		if oldCfg == nil {
 			base = NewConfig()
 		} else {
-			base = CloneConfigShallow(cur)
+			base = CloneConfigShallow(oldCfg)
 		}
 		if err := mutator(base); err != nil {
 			updateErr = err
@@ -757,6 +789,7 @@ func updateCASImpl(expectedVersion int64, mutator func(c *Config) error, persist
 		return nil, updateErr
 	}
 
+	fireAfterUpdate(oldCfg, newCfg)
 	return newCfg, nil
 }
 
@@ -980,7 +1013,7 @@ var defaultConfig = Config{
 		CloudUpload: CloudUpload{
 			Enable:            false,
 			StorageName:       "",
-			UploadPathTmpl:    "/录播归档/{{ .Platform }}/{{ .HostName }}/{{ .RoomName }}-{{ now | date \"2006-01-02\" }}.{{ .Ext }}",
+			UploadPathTmpl:    "/录播归档/{{ .Platform }}/{{ .HostName }}/{{ .FileName }}",
 			DeleteAfterUpload: false,
 		},
 		UploadTiming:        UploadTimingAfterProcess,
@@ -1137,27 +1170,21 @@ func (c *Config) RefreshLiveRoomIndexCache() {
 	}
 }
 
-func (c *Config) RemoveLiveRoomByUrl(url string) error {
-	c.RefreshLiveRoomIndexCache()
-	if index, ok := c.liveRoomIndexCache[url]; ok {
-		if index >= 0 && index < len(c.LiveRooms) && c.LiveRooms[index].Url == url {
-			c.LiveRooms = append(c.LiveRooms[:index], c.LiveRooms[index+1:]...)
-			delete(c.liveRoomIndexCache, url)
-			return nil
-		}
-	}
-	return errors.New("failed removing room: " + url)
-}
-
 func (c *Config) GetLiveRoomByUrl(url string) (*LiveRoom, error) {
-	room, err := c.getLiveRoomByUrlImpl(url)
-	if err != nil {
-		c.RefreshLiveRoomIndexCache()
-		if room, err = c.getLiveRoomByUrlImpl(url); err != nil {
-			return nil, err
+	// 配置快照是不可变的：所有写操作都走 Update 的“复制-修改-原子替换”路径，
+	// 并在替换前调用 RefreshLiveRoomIndexCache 维护索引缓存。因此这里只做只读查找，
+	// 绝不在共享快照上写 map/切片，否则会与其它 goroutine 的读发生并发读写，
+	// 触发 Go 运行时的 fatal error（concurrent map read and map write）。
+	if room, err := c.getLiveRoomByUrlImpl(url); err == nil {
+		return room, nil
+	}
+	// 索引缓存未命中时回退到只读线性扫描，作为兜底（例如未经 Refresh 的手工构造配置）。
+	for i := range c.LiveRooms {
+		if c.LiveRooms[i].Url == url {
+			return &c.LiveRooms[i], nil
 		}
 	}
-	return room, nil
+	return nil, errors.New("room " + url + " doesn't exist.")
 }
 
 func (c Config) getLiveRoomByUrlImpl(url string) (*LiveRoom, error) {

@@ -86,7 +86,7 @@ func TestExecute_AllStagesSucceed_AllDeletableFilesRemoved(t *testing.T) {
 
 	results, err := executor.Execute(ctx, config, []FileInfo{
 		{Path: originalFile, Type: FileTypeVideo},
-	}, nil)
+	}, 0, nil, nil)
 
 	// 验证：无错误
 	assert.NoError(t, err)
@@ -142,7 +142,7 @@ func TestExecute_StageFailed_AllFilesPreserved(t *testing.T) {
 
 	_, err := executor.Execute(ctx, config, []FileInfo{
 		{Path: originalFile, Type: FileTypeVideo},
-	}, nil)
+	}, 0, nil, nil)
 
 	// 验证：返回错误
 	assert.Error(t, err)
@@ -199,7 +199,7 @@ func TestExecute_Cancelled_AllFilesPreserved(t *testing.T) {
 
 	_, _ = executor.Execute(ctx, config, []FileInfo{
 		{Path: originalFile, Type: FileTypeVideo},
-	}, nil)
+	}, 0, nil, nil)
 
 	// 验证：stage2 返回成功，但下一轮循环检测到 context 已取消
 	// 注意：stage2 本身成功了，所以 deleteMarkedFiles 会被调用
@@ -248,7 +248,7 @@ func TestExecute_PassthroughPreservesDeletable(t *testing.T) {
 	results, err := executor.Execute(ctx, config, []FileInfo{
 		{Path: file1, Type: FileTypeVideo},
 		{Path: file2, Type: FileTypeOther, Deletable: true},
-	}, nil)
+	}, 0, nil, nil)
 
 	assert.NoError(t, err)
 	assert.Len(t, results, 1)
@@ -304,7 +304,7 @@ func TestExecute_UploadCancelledDuringUpload_FilePreserved(t *testing.T) {
 
 	_, err := executor.Execute(ctx, config, []FileInfo{
 		{Path: localFile, Type: FileTypeVideo},
-	}, nil)
+	}, 0, nil, nil)
 
 	// 验证：返回错误
 	assert.Error(t, err)
@@ -363,7 +363,7 @@ func TestExecute_UploadFailsMiddleOfFileList_NoneDeleted(t *testing.T) {
 		{Path: file1, Type: FileTypeVideo},
 		{Path: file2, Type: FileTypeVideo},
 		{Path: file3, Type: FileTypeVideo},
-	}, nil)
+	}, 0, nil, nil)
 
 	assert.NoError(t, err)
 
@@ -423,7 +423,7 @@ func TestExecute_StaleDeletableFromDB_ClearedOnFailure(t *testing.T) {
 	_, err := executor.Execute(ctx, config, []FileInfo{
 		{Path: file1, Type: FileTypeVideo, Deletable: true}, // 旧标记
 		{Path: file2, Type: FileTypeVideo, Deletable: true}, // 旧标记
-	}, nil)
+	}, 0, nil, nil)
 
 	assert.NoError(t, err)
 

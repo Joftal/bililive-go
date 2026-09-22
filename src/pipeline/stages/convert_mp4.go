@@ -120,6 +120,12 @@ func (s *ConvertMp4Stage) Execute(ctx *pipeline.PipelineContext, input []pipelin
 			return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
 		}
 
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			s.logs += fmt.Sprintf("创建错误管道失败: %s\n", err.Error())
+			return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
+		}
+
 		if err := cmd.Start(); err != nil {
 			s.logs += fmt.Sprintf("启动 ffmpeg 失败: %s\n", err.Error())
 			return nil, fmt.Errorf("failed to start ffmpeg: %w", err)
@@ -130,10 +136,14 @@ func (s *ConvertMp4Stage) Execute(ctx *pipeline.PipelineContext, input []pipelin
 			s.parseProgress(goCtx, stdout, duration)
 		})
 
+		// 读取 stderr 防止缓冲区满导致 ffmpeg 挂起
+		stderrBytes, _ := io.ReadAll(stderr)
+
 		// 等待命令完成
 		if err := cmd.Wait(); err != nil {
 			os.Remove(tempFile)
 			s.logs += fmt.Sprintf("ffmpeg 转换失败: %s - %s\n", file.Path, err.Error())
+			s.logs += fmt.Sprintf("ffmpeg stderr: %s\n", string(stderrBytes))
 			return nil, fmt.Errorf("ffmpeg conversion failed for %s: %w", file.Path, err)
 		}
 

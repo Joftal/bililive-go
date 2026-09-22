@@ -16,7 +16,7 @@ log:
   rotate_days: 7
 feature:
   remove_symbol_other_character: false
-out_put_tmpl: '{{.RoomName}}-{{.HostName}}/{{.StartTime}}'
+out_put_tmpl: '{{.RoomName}}-{{.HostName}}/{{ now | date "2006-01-02 15-04-05" }}.flv'
 video_split_strategies:
   on_room_name_changed: false
   max_duration: 0s

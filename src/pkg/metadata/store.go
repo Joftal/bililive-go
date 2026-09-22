@@ -92,7 +92,7 @@ func Close() error {
 	storeMu.Lock()
 	defer storeMu.Unlock()
 
-	if globalStore == nil {
+	if globalStore == nil || globalStore.db == nil {
 		return nil
 	}
 
@@ -103,6 +103,9 @@ func Close() error {
 
 // Get 从指定命名空间获取值
 func (s *Store) Get(ctx context.Context, namespace, key string) (string, error) {
+	if s == nil {
+		return "", nil
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -123,6 +126,9 @@ func (s *Store) Get(ctx context.Context, namespace, key string) (string, error) 
 
 // Set 在指定命名空间设置值
 func (s *Store) Set(ctx context.Context, namespace, key, value string) error {
+	if s == nil {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -142,6 +148,9 @@ func (s *Store) Set(ctx context.Context, namespace, key, value string) error {
 
 // Delete 从指定命名空间删除键
 func (s *Store) Delete(ctx context.Context, namespace, key string) error {
+	if s == nil {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -157,6 +166,9 @@ func (s *Store) Delete(ctx context.Context, namespace, key string) error {
 
 // GetAll 获取指定命名空间的所有键值对
 func (s *Store) GetAll(ctx context.Context, namespace string) (map[string]string, error) {
+	if s == nil {
+		return nil, nil
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -183,6 +195,9 @@ func (s *Store) GetAll(ctx context.Context, namespace string) (map[string]string
 
 // DeleteNamespace 删除整个命名空间
 func (s *Store) DeleteNamespace(ctx context.Context, namespace string) error {
+	if s == nil {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -206,6 +221,8 @@ const (
 	NamespaceUpdate = "update"
 	// NamespaceMigration 数据库迁移状态
 	NamespaceMigration = "migration"
+	// NamespaceUploaded 已上传文件标记（key=相对路径, value="1"）
+	NamespaceUploaded = "uploaded"
 )
 
 // 预定义的键常量

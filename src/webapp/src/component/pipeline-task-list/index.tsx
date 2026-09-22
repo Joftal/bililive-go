@@ -36,6 +36,7 @@ interface RecordInfo {
   platform: string;
   host_name: string;
   room_name: string;
+  display_name?: string;
   start_time: string;
 }
 
@@ -229,11 +230,19 @@ class PipelineTaskList extends Component<object, PipelineTaskListState> {
     }
   };
 
-  handleRetry = async (taskId: number) => {
+  handleRetry = async (taskId: number, stageName?: string) => {
     try {
-      const res = await fetch(`/api/pipeline/tasks/${taskId}/retry`, { method: 'POST' });
+      const body: any = {};
+      if (stageName) {
+        body.stage_name = stageName;
+      }
+      const res = await fetch(`/api/pipeline/tasks/${taskId}/retry`, {
+        method: 'POST',
+        headers: stageName ? { 'Content-Type': 'application/json' } : undefined,
+        body: stageName ? JSON.stringify(body) : undefined,
+      });
       if (res.ok) {
-        message.success('任务已重新排队');
+        message.success(stageName ? `从 ${this.getStageLabel(stageName)} 阶段重试` : '任务已重新排队');
         this.loadData();
       } else {
         message.error('重试失败');
@@ -291,6 +300,7 @@ class PipelineTaskList extends Component<object, PipelineTaskListState> {
       'extract_cover': '提取封面',
       'cloud_upload': '云盘上传',
       'custom_command': '自定义命令',
+      'burn_subtitles': '烧录字幕',
     };
     return labels[stageName] || stageName;
   };
@@ -450,6 +460,9 @@ class PipelineTaskList extends Component<object, PipelineTaskListState> {
     const results = task.stage_results || [];
     if (results.length === 0) return null;
 
+    // 是否允许阶段级重试（Failed/Cancelled/Completed 状态）
+    const canRetryStage = task.can_retry && (task.status === 'failed' || task.status === 'cancelled' || task.status === 'completed');
+
     return (
       <Collapse size="small" style={{ marginTop: 12 }}>
         {results.map((result, index) => (
@@ -461,6 +474,19 @@ class PipelineTaskList extends Component<object, PipelineTaskListState> {
                 {result.status === 'failed' && (
                   <Text type="danger">失败</Text>
                 )}
+                {canRetryStage && (result.status === 'completed' || result.status === 'failed') && (
+                  <Button
+                    type="link"
+                    size="small"
+                    icon={<PlayCircleOutlined />}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      this.handleRetry(task.id, result.stage_name);
+                    }}
+                  >
+                    从此阶段重试
+                  </Button>
+                )}
               </Space>
             }
             key={index}
@@ -470,7 +496,11 @@ class PipelineTaskList extends Component<object, PipelineTaskListState> {
             {result.error_message && (
               <Alert
                 message="错误信息"
-                description={result.error_message}
+                description={
+                  <div style={{ whiteSpace: 'pre-wrap', maxHeight: 200, overflow: 'auto' }}>
+                    {result.error_message}
+                  </div>
+                }
                 type="error"
                 style={{ marginBottom: 8 }}
               />
@@ -534,7 +564,7 @@ class PipelineTaskList extends Component<object, PipelineTaskListState> {
                 <div>
                   <Text strong>直播间：</Text>
                   <Text>
-                    {task.record_info.room_name} ({task.record_info.host_name} - {task.record_info.platform})
+                    {task.record_info.display_name || task.record_info.room_name} ({task.record_info.host_name} - {task.record_info.platform})
                   </Text>
                 </div>
               )}
@@ -549,7 +579,11 @@ class PipelineTaskList extends Component<object, PipelineTaskListState> {
               {task.error_message && (
                 <Alert
                   message="任务失败"
-                  description={task.error_message}
+                  description={
+                    <div style={{ whiteSpace: 'pre-wrap', maxHeight: 300, overflow: 'auto' }}>
+                      {task.error_message}
+                    </div>
+                  }
                   type="error"
                 />
               )}
@@ -568,7 +602,7 @@ class PipelineTaskList extends Component<object, PipelineTaskListState> {
                 取消任务
               </Button>
             )}
-            {(task.status === 'failed' || task.status === 'cancelled') && task.can_retry && (
+            {(task.status === 'failed' || task.status === 'cancelled' || task.status === 'completed') && task.can_retry && (
               <Button icon={<PlayCircleOutlined />} onClick={() => this.handleRetry(task.id)}>
                 重新执行
               </Button>
@@ -609,7 +643,7 @@ class PipelineTaskList extends Component<object, PipelineTaskListState> {
         width: 200,
         render: (_, record: PipelineTask) => (
           <span>
-            {record.record_info?.room_name || '-'}
+            {record.record_info?.display_name || record.record_info?.room_name || '-'}
             {record.record_info?.platform && (
               <Tag style={{ marginLeft: 4 }}>{record.record_info.platform}</Tag>
             )}

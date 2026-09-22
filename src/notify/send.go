@@ -16,8 +16,9 @@ import (
 
 // RecordingFileDetail 录制文件详情
 type RecordingFileDetail struct {
-	Name string // 文件名（不含路径）
-	Size int64  // 文件大小（字节）
+	Name     string // 文件名（不含路径）
+	Size     int64  // 文件大小（字节）
+	Uploaded bool   // 是否已上传到云端（用于摘要消息标注）
 }
 
 // SendNotification 发送统一通知函数
@@ -250,6 +251,77 @@ func buildRecordingSummaryMessage(hostName, platform string, files []RecordingFi
 	return
 }
 
+// buildUploadedSummaryBody 构造"已上传到云端"场景的录制摘要消息体
+// 与 buildRecordingSummaryMessage 类似，但标注文件已上传、不显示磁盘空间
+func buildUploadedSummaryBody(platform string, files []RecordingFileDetail) string {
+	const maxDisplayFiles = 30
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "平台：%s\n", platform)
+	fmt.Fprintf(&sb, "录制文件：%d 个（已上传到云端）\n", len(files))
+	var totalSize int64
+	for i, f := range files {
+		totalSize += f.Size
+		if i < maxDisplayFiles {
+			fmt.Fprintf(&sb, "  %d. %s (%s)\n", i+1, f.Name, formatFileSize(f.Size))
+		}
+	}
+	if len(files) > maxDisplayFiles {
+		fmt.Fprintf(&sb, "  ... 还有 %d 个文件未显示\n", len(files)-maxDisplayFiles)
+	}
+	fmt.Fprintf(&sb, "总大小：%s\n", formatFileSize(totalSize))
+	fmt.Fprintf(&sb, "本地文件已清理")
+	return sb.String()
+}
+
+// buildMixedSummaryBody 构造"部分上传、部分本地保留"场景的消息体
+func buildMixedSummaryBody(platform string, uploaded, kept []RecordingFileDetail, outputPath string) string {
+	const maxDisplayFiles = 30
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "平台：%s\n", platform)
+
+	// 已上传部分
+	fmt.Fprintf(&sb, "已上传到云端：%d 个\n", len(uploaded))
+	var uploadedSize int64
+	for i, f := range uploaded {
+		uploadedSize += f.Size
+		if i < maxDisplayFiles {
+			fmt.Fprintf(&sb, "  %d. %s (%s)\n", i+1, f.Name, formatFileSize(f.Size))
+		}
+	}
+	if len(uploaded) > maxDisplayFiles {
+		fmt.Fprintf(&sb, "  ... 还有 %d 个文件未显示\n", len(uploaded)-maxDisplayFiles)
+	}
+	fmt.Fprintf(&sb, "上传总大小：%s\n", formatFileSize(uploadedSize))
+
+	// 本地保留部分
+	fmt.Fprintf(&sb, "本地保留：%d 个\n", len(kept))
+	var keptSize int64
+	for i, f := range kept {
+		keptSize += f.Size
+		if i < maxDisplayFiles {
+			fmt.Fprintf(&sb, "  %d. %s (%s)\n", i+1, f.Name, formatFileSize(f.Size))
+		}
+	}
+	if len(kept) > maxDisplayFiles {
+		fmt.Fprintf(&sb, "  ... 还有 %d 个文件未显示\n", len(kept)-maxDisplayFiles)
+	}
+	fmt.Fprintf(&sb, "本地总大小：%s", formatFileSize(keptSize))
+	if outputPath != "" {
+		if free, err := getDiskFreeSpace(outputPath); err == nil {
+			fmt.Fprintf(&sb, "\n剩余磁盘空间：%s", formatFileSize(int64(free)))
+		}
+	}
+	return sb.String()
+}
+
+// buildRecordingSummaryMessageBody 构造纯本地保留的消息体（不含 title）
+func buildRecordingSummaryMessageBody(platform string, files []RecordingFileDetail, outputPath string) string {
+	_, body := buildRecordingSummaryMessage("", platform, files, outputPath)
+	return body
+}
+
 // SendRecordingSummary 录制结束后发送录制文件摘要通知
 // outputPath 为录制输出路径，用于获取剩余磁盘空间
 func SendRecordingSummary(logger *livelogger.LiveLogger, hostName, platform string, files []RecordingFileDetail, outputPath string) {
@@ -262,7 +334,59 @@ func SendRecordingSummary(logger *livelogger.LiveLogger, hostName, platform stri
 	}
 
 	title, body := buildRecordingSummaryMessage(hostName, platform, files, outputPath)
+	sendToAllChannels(cfg, logger, title, body)
+}
 
+// SendPipelineRecordingSummary Pipeline 完成后发送录制摘要通知
+// originalFiles: 原始录制文件列表（allUploaded 时用于显示）
+// finalFiles: Pipeline 处理后的最终文件列表（含 Uploaded 标记）
+func SendPipelineRecordingSummary(
+	logger *livelogger.LiveLogger,
+	hostName, platform string,
+	originalFiles, finalFiles []RecordingFileDetail,
+	outputPath string,
+) {
+	cfg := configs.GetCurrentConfig()
+	if cfg == nil || !cfg.Notify.SendRecordingSummary {
+		return
+	}
+
+	// 分离已上传文件和本地保留文件
+	var uploaded []RecordingFileDetail
+	var kept []RecordingFileDetail
+	for _, f := range finalFiles {
+		if f.Uploaded {
+			uploaded = append(uploaded, f)
+		} else {
+			kept = append(kept, f)
+		}
+	}
+
+	var title, body string
+	if len(uploaded) > 0 && len(kept) == 0 {
+		// 所有文件已上传：显示上传文件列表
+		title = fmt.Sprintf("%s 录制完成", hostName)
+		body = buildUploadedSummaryBody(platform, uploaded)
+	} else if len(uploaded) > 0 && len(kept) > 0 {
+		// 部分上传、部分保留：显示两段
+		title = fmt.Sprintf("%s 录制完成", hostName)
+		body = buildMixedSummaryBody(platform, uploaded, kept, outputPath)
+	} else if len(kept) > 0 {
+		// 全部本地保留
+		title, body = buildRecordingSummaryMessage(hostName, platform, kept, outputPath)
+	} else if len(originalFiles) > 0 {
+		// finalFiles 为空，回退到 originalFiles
+		title = fmt.Sprintf("%s 录制完成", hostName)
+		body = buildRecordingSummaryMessageBody(platform, originalFiles, outputPath)
+	} else {
+		return
+	}
+
+	sendToAllChannels(cfg, logger, title, body)
+}
+
+// sendToAllChannels 向所有已启用的通知通道推送摘要消息
+func sendToAllChannels(cfg *configs.Config, logger *livelogger.LiveLogger, title, body string) {
 	// Telegram
 	if cfg.Notify.Telegram.Enable {
 		msg := fmt.Sprintf("%s\n%s", title, body)

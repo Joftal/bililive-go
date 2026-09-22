@@ -1,8 +1,8 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, request as apiRequest } from '@playwright/test';
 
 /**
  * 直播录制功能测试
- * 
+ *
  * 使用 osrp-stream-tester 提供的 dev 直播间进行测试
  * 测试添加直播间、开始/停止录制等功能
  */
@@ -10,6 +10,66 @@ import { test, expect } from '@playwright/test';
 // dev 测试流服务器地址
 const DEV_STREAM_SERVER = 'http://127.0.0.1:8888';
 const DEV_STREAM_URL = `${DEV_STREAM_SERVER}/live/test.flv`;
+// bililive-go 后端地址
+const BGO_SERVER = 'http://127.0.0.1:8080';
+
+interface LiveInfo {
+  id: string;
+  live_url?: string;
+}
+
+const preExistingLiveIds = new Set<string>();
+let baselineCaptured = false;
+
+// 本地运行时 Playwright 可能复用开发者已经启动的 bililive-go。先记录既有房间，
+// 避免测试清理误删开发者的持久化配置。
+test.beforeAll(async () => {
+  const ctx = await apiRequest.newContext();
+  try {
+    const res = await ctx.get(`${BGO_SERVER}/api/lives`);
+    if (!res.ok()) {
+      return;
+    }
+    const lives: LiveInfo[] = await res.json();
+    if (!Array.isArray(lives)) {
+      return;
+    }
+    for (const live of lives) {
+      if (live.id) {
+        preExistingLiveIds.add(live.id);
+      }
+    }
+    baselineCaptured = true;
+  } finally {
+    await ctx.dispose();
+  }
+});
+
+// 本文件会通过 UI 添加 dev 直播间；由于所有 spec 共用同一个后端进程（workers=1），
+// 若不清理，残留的监控房间会一直被判定为"在播"，导致后续 spec（如 update-*）的
+// active_recordings 断言失败。这里只删除本文件新建的 dev 直播间，既保证测试隔离，
+// 也不会在复用本地服务时误删开发者已有的监控房间。
+test.afterAll(async () => {
+  if (!baselineCaptured) {
+    return;
+  }
+  const ctx = await apiRequest.newContext();
+  try {
+    const res = await ctx.get(`${BGO_SERVER}/api/lives`);
+    if (res.ok()) {
+      const lives: LiveInfo[] = await res.json();
+      if (Array.isArray(lives)) {
+        for (const live of lives) {
+          if (live.id && live.live_url === DEV_STREAM_URL && !preExistingLiveIds.has(live.id)) {
+            await ctx.delete(`${BGO_SERVER}/api/lives/${live.id}`);
+          }
+        }
+      }
+    }
+  } finally {
+    await ctx.dispose();
+  }
+});
 
 test.describe('直播间管理测试', () => {
   test.beforeEach(async ({ page }) => {
@@ -224,4 +284,3 @@ test.describe('紧急情况：停止所有录制', () => {
     expect(count).toBeGreaterThanOrEqual(0);
   });
 });
-

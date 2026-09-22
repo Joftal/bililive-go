@@ -32,6 +32,8 @@ const (
 	OptionCommand = "command"
 	// OptionFileTypes 处理的文件类型过滤
 	OptionFileTypes = "file_types"
+	// OptionUploadSubtitles 是否上传关联的 .ass 弹幕字幕文件
+	OptionUploadSubtitles = "upload_subtitles"
 	// OptionCodec 视频编码器
 	OptionCodec = "codec"
 	// OptionCrf CRF 质量值
@@ -85,6 +87,7 @@ func ConvertLegacyConfig(legacy *configs.OnRecordFinished) *PipelineConfig {
 			OptionDeleteAllAfter: legacy.CloudUpload.DeleteAllAfterUpload,
 			OptionUploadTiming:   string(legacy.UploadTiming),
 			OptionFileTypes:      []string{string(FileTypeVideo), string(FileTypeCover)},
+			OptionUploadSubtitles: legacy.CloudUpload.UploadSubtitles,
 		},
 	}
 	hasCloudUpload := legacy.CloudUpload.Enable && legacy.CloudUpload.StorageName != ""

@@ -44,8 +44,8 @@ const UPLOAD_PRESETS: PresetTemplate[] = [
   },
   {
     name: '简洁归档',
-    description: '按平台/主播归档，文件名带日期',
-    template: '/录播归档/{{ .Platform }}/{{ .HostName }}/{{ .RoomName }}-{{ now | date "2006-01-02" }}.{{ .Ext }}',
+    description: '按平台/主播归档，文件名带日期时间',
+    template: '/录播归档/{{ .Platform }}/{{ .HostName }}/{{ .RoomName }}-{{ now | date "2006-01-02 15-04-05" }}.{{ .Ext }}',
   },
   {
     name: '按房间归档',
@@ -95,7 +95,7 @@ const MOCK_DATA: MockStream[] = [
 const renderUploadTemplate = (template: string, stream: MockStream, room: MockStream['rooms'][0]): string => {
   const fileName = `[${room.date} ${room.time}][${stream.hostName}][${room.roomName}].flv`;
   let path = template;
-  path = path.replace(/\{\{ ?\.Platform ?\}\}/g, stream.platform);
+  path = path.replace(/\{\{ ?\.Platform ?\}\}/g, stream.platformCN);
   path = path.replace(/\{\{ ?\.HostName ?\}\}/g, stream.hostName);
   path = path.replace(/\{\{ ?\.RoomName ?\}\}/g, room.roomName);
   path = path.replace(/\{\{ ?\.FileName ?\}\}/g, fileName);
@@ -123,28 +123,40 @@ const analyzeConfig = (config: any) => {
   const upload = cu.enable ?? false;
   const delAfter = cu.delete_after_upload ?? false;
   const delAllAfter = cu.delete_all_after_upload ?? false;
+  const uploadAss = cu.upload_subtitles ?? false;
 
-  // 文件状态：uploaded(上传), deleted(删除), kept(保留)
+  // 文件状态：uploaded(上传保留), uploaded_deleted(上传后删除), intermediate(中间产物,不上传),
+  // deleted(删除), kept(本地保留)
   const files: Record<string, { ext: string; desc: string; status: string }> = {};
 
   // 初始文件
   files['video.flv'] = { ext: '.flv', desc: '原始录制视频', status: 'kept' };
   files['video.ass'] = { ext: '.ass', desc: '弹幕字幕', status: 'kept' };
 
-  // immediate 模式：先上传原始文件
+  // immediate 模式：先上传原始文件（.ass 在录制结束时已存在，可一并上传）
   if (isImmediate && upload) {
     files['video.flv'].status = 'uploaded';
+    if (uploadAss) {
+      files['video.ass'].status = 'uploaded';
+    }
   }
 
   // 转码
   if (convert) {
     files['video.mp4'] = { ext: '.mp4', desc: '转码后视频', status: 'kept' };
     if (deleteFlv) {
-      // 如果已经被标记为 uploaded，改为 uploaded_deleted
-      if (files['video.flv'].status === 'uploaded') {
+      if (isImmediate && upload) {
+        // immediate 模式：.flv 已在 pipeline 开头被上传，转换后被标记为 Deletable 并删除
+        files['video.flv'].status = 'uploaded_deleted';
+      } else if (files['video.flv'].status === 'uploaded') {
         files['video.flv'].status = 'uploaded_deleted';
       } else {
-        files['video.flv'].status = 'deleted';
+        // after_process 模式：源文件是中间产物，不参与上传
+        files['video.flv'].status = 'intermediate';
+      }
+    } else {
+      if (files['video.flv'].status === 'kept') {
+        files['video.flv'].status = 'uploaded';
       }
     }
   }
@@ -153,18 +165,36 @@ const analyzeConfig = (config: any) => {
   if (burn) {
     files['video.mkv'] = { ext: '.mkv', desc: '烧录后视频', status: 'kept' };
     if (burnDelSource) {
-      // 删除转码后的 mp4 或原始 flv
       const target = convert ? 'video.mp4' : 'video.flv';
-      if (files[target].status === 'uploaded') {
+      if (isImmediate && upload && !convert) {
+        // immediate 模式（无转码）：.flv 已在 pipeline 开头被上传，烧录后被标记为 Deletable 并删除
+        files[target].status = 'uploaded_deleted';
+      } else if (files[target].status === 'uploaded') {
         files[target].status = 'uploaded_deleted';
       } else {
-        files[target].status = 'deleted';
+        // after_process 模式或 immediate+convert（.mp4 未被上传）：中间产物
+        files[target].status = 'intermediate';
+      }
+    } else {
+      const src = convert ? 'video.mp4' : 'video.flv';
+      // after_process 模式：源视频保留在 BurnSubtitlesStage output 中，会被 cloud_upload 上传
+      // immediate 模式：源视频在 cloud_upload 之后才创建/保留，不会被上传
+      if (!isImmediate && files[src] && files[src].status === 'kept') {
+        files[src].status = 'uploaded';
       }
     }
     if (burnDelAss) {
-      files['video.ass'].status = 'deleted';
+      if (isImmediate && upload) {
+        // immediate 模式：.ass 已在 pipeline 开头被上传，烧录后被标记为 Deletable 并删除
+        files['video.ass'].status = 'uploaded_deleted';
+      } else {
+        files['video.ass'].status = 'deleted';
+      }
     }
   }
+
+  // immediate 模式下，convert 和 burn 产出的文件（.mp4, .mkv）不会被上传
+  // 它们在 cloud_upload 之后才创建，应保持 'kept' 状态
 
   // 封面
   if (cover) {
@@ -173,9 +203,10 @@ const analyzeConfig = (config: any) => {
 
   // after_process 模式：上传最终文件
   if (isAfterProcess && upload) {
-    // 上传第一个视频和封面
+    // 上传最终产物
     if (burn) {
       files['video.mkv'].status = 'uploaded';
+      // 源视频已在烧录阶段标记为 uploaded（burnDelSource=false 时）
     } else if (convert) {
       files['video.mp4'].status = 'uploaded';
     } else {
@@ -184,22 +215,28 @@ const analyzeConfig = (config: any) => {
     if (cover) {
       files['cover.jpg'].status = 'uploaded';
     }
+    // 上传弹幕字幕（需 after_process 模式，immediate 模式下 .ass 尚未生成）
+    if (uploadAss) {
+      files['video.ass'].status = 'uploaded';
+    }
 
     // 删除逻辑
     if (delAllAfter) {
-      // 删除全部
+      // 删除全部：先保存已上传文件的状态，再全部标记删除，最后恢复已上传的标记
+      const uploadedStatus: Record<string, string> = {};
+      Object.entries(files).forEach(([name, f]) => {
+        if (f.status === 'uploaded') uploadedStatus[name] = f.status;
+      });
       Object.values(files).forEach(f => { f.status = 'deleted'; });
-      // 但上传的文件标记为 uploaded_deleted
-      if (burn) files['video.mkv'].status = 'uploaded_deleted';
-      else if (convert) files['video.mp4'].status = 'uploaded_deleted';
-      else files['video.flv'].status = 'uploaded_deleted';
-      if (cover) files['cover.jpg'].status = 'uploaded_deleted';
+      // 恢复已上传文件为 uploaded_deleted
+      Object.entries(uploadedStatus).forEach(([name]) => {
+        files[name].status = 'uploaded_deleted';
+      });
     } else if (delAfter) {
       // 只删除已上传的文件
-      if (burn) files['video.mkv'].status = 'uploaded_deleted';
-      else if (convert) files['video.mp4'].status = 'uploaded_deleted';
-      else files['video.flv'].status = 'uploaded_deleted';
-      if (cover) files['cover.jpg'].status = 'uploaded_deleted';
+      Object.entries(files).forEach(([, f]) => {
+        if (f.status === 'uploaded') f.status = 'uploaded_deleted';
+      });
     }
   }
 
@@ -208,7 +245,10 @@ const analyzeConfig = (config: any) => {
     const hasVideo = Object.entries(files).some(([name, f]) => {
       if (name === 'video.ass') return false;
       const ext = f.ext.toLowerCase();
-      return (ext === '.flv' || ext === '.mp4' || ext === '.mkv') && f.status !== 'deleted' && f.status !== 'uploaded_deleted';
+      if (ext !== '.flv' && ext !== '.mp4' && ext !== '.mkv') return false;
+      // 只有 kept 或 uploaded（本地保留）的视频才算"存在"
+      // intermediate（中间产物）和 deleted/uploaded_deleted（已删除）不算
+      return f.status === 'kept' || f.status === 'uploaded';
     });
     if (!hasVideo) {
       files['video.ass'].status = 'deleted';
@@ -228,8 +268,8 @@ const analyzeConfig = (config: any) => {
     } else if (f.status === 'uploaded_deleted') {
       uploaded.push(name);
       deleted.push(name);
-    } else if (f.status === 'deleted') {
-      deleted.push(name);
+    } else if (f.status === 'deleted' || f.status === 'intermediate') {
+      deleted.push(name); // intermediate 是中间产物，显示为删除
     } else {
       kept.push(name);
     }
@@ -273,6 +313,11 @@ const FileProcessingPreview: React.FC<{ config: any }> = ({ config }) => {
           }
         </Descriptions.Item>
       </Descriptions>
+      <div style={{ marginTop: 12, fontSize: 12, color: '#888', lineHeight: 1.8 }}>
+        <div>💡 <b>说明：</b>开启「转换后删除 FLV」或「烧录后删除源视频」后，只会上传最终成品（MP4 或 MKV）。</div>
+        <div style={{ paddingLeft: 16 }}>如果不开启，原始视频也会一并上传到云端（相当于云端保存了两份视频）。</div>
+        <div style={{ paddingLeft: 16 }}>上方预览会根据你当前的设置实时显示哪些文件会被上传、删除或保留。</div>
+      </div>
     </Card>
   );
 };
@@ -290,6 +335,27 @@ interface CloudUploadSettingsProps {
  */
 const CloudUploadSettings: React.FC<CloudUploadSettingsProps> = ({ config, form }) => {
   const isEnabled = config.on_record_finished?.cloud_upload?.enable;
+
+  // 订阅表单中影响文件处理预览的字段，使预览实时反映用户编辑
+  const watchedOrf = Form.useWatch('on_record_finished', form);
+  const watchedCloudUpload = Form.useWatch(['on_record_finished', 'cloud_upload'], form);
+
+  // 将表单实时值合并到 config 副本中，供 FileProcessingPreview 使用
+  // Form.useWatch 返回 undefined 时表示字段未被编辑，此时保留 config 中的原始值
+  const liveConfig = useMemo(() => {
+    if (!watchedOrf && !watchedCloudUpload) return config;
+    return {
+      ...config,
+      on_record_finished: {
+        ...config.on_record_finished,
+        ...watchedOrf,
+        cloud_upload: {
+          ...config.on_record_finished?.cloud_upload,
+          ...watchedCloudUpload,
+        },
+      },
+    };
+  }, [config, watchedOrf, watchedCloudUpload]);
 
   // 互斥逻辑：开启一个时关闭另一个
   const handleDeleteAfterChange = (checked: boolean) => {
@@ -325,7 +391,24 @@ const CloudUploadSettings: React.FC<CloudUploadSettingsProps> = ({ config, form 
             >
               OpenList 管理页面
             </a>{' '}
-            添加网盘。
+            添加网盘。{' '}
+            {config.openlist?.username && config.openlist?.password && (
+              <>
+                <span style={{ color: '#999', fontSize: 12 }}>
+                  (登录凭据: {config.openlist.username} / {config.openlist.password})
+                </span>{' '}
+              </>
+            )}
+            <span style={{ color: '#999', fontSize: 12 }}>
+              (如无法访问，尝试{' '}
+              <a
+                href="/remotetools/tool/openlist/"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                通过代理访问
+              </a>)
+            </span>
           </>
         }
         type="info"
@@ -333,8 +416,8 @@ const CloudUploadSettings: React.FC<CloudUploadSettingsProps> = ({ config, form 
         style={{ marginBottom: 16 }}
       />
 
-      {/* 文件处理预览 */}
-      <FileProcessingPreview config={config} />
+      {/* 文件处理预览 - 使用表单实时值，无需保存即可反映用户编辑 */}
+      <FileProcessingPreview config={liveConfig} />
 
       <ConfigField label="启用云上传" description="录制结束后自动把视频上传到网盘">
         <Form.Item name={['on_record_finished', 'cloud_upload', 'enable']} valuePropName="checked" noStyle>
@@ -369,7 +452,7 @@ const CloudUploadSettings: React.FC<CloudUploadSettingsProps> = ({ config, form 
           presets={UPLOAD_PRESETS}
           mockData={MOCK_DATA}
           renderTemplate={renderUploadTemplate}
-          placeholder="/录播归档/{{ .Platform }}/{{ .HostName }}/{{ now | date '2006-01-02' }}/{{ .FileName }}"
+          placeholder={'/录播归档/{{ .Platform }}/{{ .HostName }}/{{ now | date "2006-01-02" }}/{{ .FileName }}'}
           showTreePreview={true}
           width={500}
         />
@@ -383,6 +466,11 @@ const CloudUploadSettings: React.FC<CloudUploadSettingsProps> = ({ config, form 
       <ConfigField label="上传后删除全部文件" description="选「处理完再上传」时，上传成功后删除所有本地文件（含中间产物）。选「先上传再处理」时此开关无效">
         <Form.Item name={['on_record_finished', 'cloud_upload', 'delete_all_after_upload']} valuePropName="checked" noStyle>
           <Switch onChange={handleDeleteAllAfterChange} />
+        </Form.Item>
+      </ConfigField>
+      <ConfigField label="上传弹幕字幕" description="同时上传与视频同名的 .ass 弹幕字幕文件到云存储。需开启弹幕录制">
+        <Form.Item name={['on_record_finished', 'cloud_upload', 'upload_subtitles']} valuePropName="checked" noStyle>
+          <Switch />
         </Form.Item>
       </ConfigField>
 

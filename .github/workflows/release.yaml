@@ -130,6 +130,7 @@ jobs:
             dist/**/*.zip
             dist/**/*.7z
           prerelease: ${{ contains(env.GIT_TAG, 'rc') }}
+          generate_release_notes: true
       - name: "[Dry-Run] 跳过 GitHub Release 发布"
         if: ${{ env.IS_DRY_RUN == 'true' }}
         run: echo "::notice::Dry-run 模式：跳过 GitHub Release 发布（GIT_TAG=$GIT_TAG）"

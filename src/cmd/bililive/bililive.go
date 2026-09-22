@@ -339,6 +339,8 @@ func main() {
 
 	// 如果启用了云上传功能，初始化 OpenList 管理器
 	var openlistManager *openlist.Manager
+	// 串行化 OpenList 生命周期操作，防止快速 enable/disable 导致服务泄漏
+	var openlistLifecycleMu sync.Mutex
 	if config.OnRecordFinished.CloudUpload.Enable {
 		// 获取 OpenList 数据目录
 		openlistDataPath := config.OpenList.DataPath
@@ -357,6 +359,9 @@ func main() {
 		bilisentryPkg.Go(func() {
 			if err := openlistManager.Start(rootCtx); err != nil {
 				logger.WithError(err).Error("启动 OpenList 失败，云上传功能将不可用")
+				// 启动失败时清除全局指针（CAS：仅当仍为当前实例时才清除，避免误清新 Manager）
+				openlist.ClearGlobalManagerIf(openlistManager)
+				openlistManager = nil
 			}
 		})
 
@@ -365,6 +370,113 @@ func main() {
 
 		logger.Info("云上传功能已启用")
 	}
+
+	// 注册配置更新回调：当用户通过 Web UI 首次启用云上传时，自动创建并启动 OpenList Manager
+	configs.RegisterAfterUpdate(func(oldCfg, newCfg *configs.Config) {
+		if newCfg == nil {
+			return
+		}
+		wasEnabled := oldCfg != nil && oldCfg.OnRecordFinished.CloudUpload.Enable
+		isEnabled := newCfg.OnRecordFinished.CloudUpload.Enable
+
+		// 关闭云上传：停止 OpenList 进程
+		if wasEnabled && !isEnabled {
+			openlistLifecycleMu.Lock()
+			defer openlistLifecycleMu.Unlock()
+			if mgr := openlist.GetGlobalManager(); mgr != nil {
+				logger.Info("检测到云上传已关闭，正在停止 OpenList...")
+				mgr.Stop()
+				servers.SetOpenListManager(nil)
+				openlistManager = nil
+			}
+			return
+		}
+
+		// 开启云上传：启动 OpenList 进程
+		if wasEnabled || !isEnabled {
+			// 云上传保持启用：检查是否需要重建 Manager（端口或数据目录变更）
+			if wasEnabled && isEnabled {
+				if mgr := openlist.GetGlobalManager(); mgr != nil {
+					// 解析新的配置值
+					newPort := newCfg.OpenList.Port
+					if newPort == 0 {
+						newPort = 5244
+					}
+					newDataPath := newCfg.OpenList.DataPath
+					if newDataPath == "" {
+						newDataPath = filepath.Join(newCfg.AppDataPath, "openlist")
+					}
+					// 与 Manager 当前值比较
+					if mgr.GetPort() != newPort || mgr.GetDataPath() != newDataPath {
+						logger.Infof("检测到 OpenList 配置变更（端口: %d→%d, 数据目录: %s→%s），正在重建 Manager...",
+							mgr.GetPort(), newPort, mgr.GetDataPath(), newDataPath)
+						openlistLifecycleMu.Lock()
+						mgr.Stop()
+						servers.SetOpenListManager(nil)
+						// 创建新 Manager 并启动
+						newMgr := openlist.NewManager(newDataPath, newPort)
+						servers.SetOpenListManager(newMgr)
+						openlistManager = newMgr
+						openlistLifecycleMu.Unlock()
+						bilisentryPkg.Go(func() {
+							if err := newMgr.Start(rootCtx); err != nil {
+								logger.WithError(err).Error("重建 OpenList 失败")
+								openlistLifecycleMu.Lock()
+								// CAS：仅当全局仍为 newMgr 时才清除
+								openlist.ClearGlobalManagerIf(newMgr)
+								openlistManager = nil
+								openlistLifecycleMu.Unlock()
+							}
+						})
+					}
+				}
+			}
+			return
+		}
+
+		openlistLifecycleMu.Lock()
+		// 已有 Manager 则跳过
+		if openlist.GetGlobalManager() != nil {
+			openlistLifecycleMu.Unlock()
+			return
+		}
+
+		logger.Info("检测到云上传已启用，正在初始化 OpenList...")
+
+		openlistDataPath := newCfg.OpenList.DataPath
+		if openlistDataPath == "" {
+			openlistDataPath = filepath.Join(newCfg.AppDataPath, "openlist")
+		}
+		openlistPort := newCfg.OpenList.Port
+		if openlistPort == 0 {
+			openlistPort = 5244
+		}
+
+		mgr := openlist.NewManager(openlistDataPath, openlistPort)
+		// 先设置全局 Manager，让 API 端能立即获取到状态
+		servers.SetOpenListManager(mgr)
+		openlistLifecycleMu.Unlock()
+
+		// 在后台启动 OpenList 进程（需要 rootCtx 生命周期）
+		bilisentryPkg.Go(func() {
+			if err := mgr.Start(rootCtx); err != nil {
+				logger.WithError(err).Error("动态启动 OpenList 失败，云上传功能将不可用")
+				// CAS：仅当全局仍为当前实例时才清除，避免误清新 Manager
+				openlistLifecycleMu.Lock()
+				openlist.ClearGlobalManagerIf(mgr)
+				openlistLifecycleMu.Unlock()
+				return
+			}
+			// Start 完成后复核配置：如果在 waitForReady 期间配置已关闭，立即清理
+			openlistLifecycleMu.Lock()
+			defer openlistLifecycleMu.Unlock()
+			if cfg := configs.GetCurrentConfig(); cfg == nil || !cfg.OnRecordFinished.CloudUpload.Enable {
+				logger.Info("OpenList 启动完成但云上传已关闭，立即停止")
+				mgr.Stop()
+				openlist.ClearGlobalManagerIf(mgr)
+			}
+		})
+	})
 
 	// 初始化 Pipeline 管道管理器
 	pipelineDbPath := filepath.Join(config.AppDataPath, "db", "pipeline.db")
@@ -713,6 +825,11 @@ func main() {
 		// 关闭 Pipeline 管道管理器
 		if inst.PipelineManager != nil {
 			inst.PipelineManager.Close(ctx)
+		}
+		// 等待异步通知 goroutine（如 Telegram/Email 摘要发送）完成
+		// 必须在 PipelineManager.Close 之后——pipeline 回调可能触发最后的通知
+		if rm, ok := inst.RecorderManager.(recorders.Manager); ok {
+			rm.WaitForNotifications()
 		}
 		// 关闭直播间状态管理器
 		if liveStateManager != nil {

@@ -51,6 +51,14 @@ func (s *CustomCommandStage) Execute(ctx *pipeline.PipelineContext, input []pipe
 	var output []pipeline.FileInfo
 
 	for _, file := range input {
+		// 跳过中间产物（如 ConvertMp4 标记的原始 FLV），避免重复执行命令。
+		// 但 delete_all_after_upload 模式会将所有文件（含最终成品）标记为 Deletable，
+		// 此类文件仍需执行自定义命令，不能跳过。
+		if file.Deletable && !isDeleteAllMarked(file) {
+			output = append(output, file)
+			continue
+		}
+
 		// 渲染命令模板
 		cmdStr, err := s.renderCommand(ctx, file)
 		if err != nil {
@@ -75,6 +83,16 @@ func (s *CustomCommandStage) Execute(ctx *pipeline.PipelineContext, input []pipe
 	}
 
 	return output, nil
+}
+
+// isDeleteAllMarked 检查文件是否被 delete_all_after_upload 模式标记
+// 此类文件虽为 Deletable，但属于最终成品，仍需执行自定义命令
+func isDeleteAllMarked(file pipeline.FileInfo) bool {
+	if file.Metadata == nil {
+		return false
+	}
+	da, ok := file.Metadata["delete_all"].(bool)
+	return ok && da
 }
 
 // renderCommand 渲染命令模板
