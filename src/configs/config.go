@@ -1092,6 +1092,29 @@ func newConfigPostProcess(c *Config) {
 	for i := range c.LiveRooms {
 		c.LiveRooms[i].Url = NormalizeLiveRoomUrl(c.LiveRooms[i].Url)
 	}
+	// 规范化后同一房间的不同写法（m.douyu.com/1 与 www.douyu.com/1；live_web_rid query 形态与长链）
+	// 会变成完全相同的 URL。老版本存量条目 + 升级后经 UI 正常添加的条目就会各占一行，
+	// 加载不去重则同一房间建出两个 Live、开播双录。合并策略：保留第一条，
+	// is_listening 任一为真即为真，notify_only 全部为真才为真（宁可多录，不漏录）。
+	if len(c.LiveRooms) > 1 {
+		seen := make(map[string]int, len(c.LiveRooms))
+		deduped := c.LiveRooms[:0]
+		for _, room := range c.LiveRooms {
+			if idx, ok := seen[room.Url]; ok {
+				if room.IsListening {
+					deduped[idx].IsListening = true
+				}
+				if !room.NotifyOnly {
+					deduped[idx].NotifyOnly = false
+				}
+				fmt.Fprintf(os.Stderr, "[Config] 检测到规范化后重复的房间 %s，已合并到先线条目\n", room.Url)
+				continue
+			}
+			seen[room.Url] = len(deduped)
+			deduped = append(deduped, room)
+		}
+		c.LiveRooms = deduped
+	}
 }
 
 // configMinimal 是配置文件的最小子集，仅包含 launcher 决策所需的字段。
@@ -1475,7 +1498,28 @@ func NormalizeLiveRoomUrl(urlStr string) string {
 		u.Host = std
 		return u.String()
 	}
+	// 抖音直播首页分享出的 query 形态链接（如 live.douyin.com/?live_web_rid=xxx）path 为空，
+	// btools 从 path 取房间号会拿不到 → 房间信息请求必然失败，规范化为长链 https://live.douyin.com/<web_rid>。
+	// 只信任 live_web_rid（账号级稳定 web_rid），不用 room_id（可能是固化场次的真实 roomId）。
+	if u.Host == "live.douyin.com" && strings.Trim(u.Path, "/") == "" {
+		if rid := u.Query().Get("live_web_rid"); isAllDigits(rid) {
+			return "https://live.douyin.com/" + rid
+		}
+	}
 	return urlStr
+}
+
+// isAllDigits 判断 s 是否非空且全部为 ASCII 数字。
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // PlatformKeyDouyin 抖音的平台键。抖音的直播间解析依赖本地 bililive-tools 服务，

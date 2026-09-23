@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -25,6 +26,13 @@ var signJSCode string
 var (
 	reRoomID  = regexp.MustCompile(`"room_id"\s*:\s*(\d+)`)
 	reRoomID2 = regexp.MustCompile(`roomId\\?":\\?"(\d+)`)
+	// v.douyin.com 短链跳转链中的房间号形态，见 resolveShareLinkRoomID
+	reReflowRoomID = regexp.MustCompile(`/webcast/reflow/(\d+)`)
+	reWebRid       = regexp.MustCompile(`live\.douyin\.com/(\d+)`)
+	reRoomIDQuery  = regexp.MustCompile(`[?&]room_id=(\d+)`)
+	// reRoomIDStr 匹配 roomIdStr 字符串字段；页面里同名的数字字段 roomId 有 JS 精度丢失，不可用
+	reRoomIDStr = regexp.MustCompile(`roomIdStr\\{0,2}"\s*:\s*\\{0,2}"(\d+)`)
+	reShareCode = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 )
 
 // signJSProgram 预编译的 sign.js 字节码，避免每次签名都重新解析 485KB 脚本
@@ -82,11 +90,21 @@ func (c *DouyinClient) Start(ctx context.Context) error {
 		}
 	}
 
-	// 从页面获取真实 roomId
-	realRoomID, err := fetchRealRoomID(c.roomID, c.cookies, c.logger)
-	if err != nil {
-		c.logger.WithError(err).Warn("获取真实 roomId 失败，使用原始 roomID")
-		realRoomID = c.roomID
+	// 获取真实 roomId：纯数字走页面解析；否则视为 v.douyin.com 分享短链口令，先解析短链
+	var realRoomID string
+	if isNumericRoomID(c.roomID) {
+		var err error
+		realRoomID, err = fetchRealRoomID(c.roomID, c.cookies, c.logger)
+		if err != nil {
+			c.logger.WithError(err).Warn("获取真实 roomId 失败，使用原始 roomID")
+			realRoomID = c.roomID
+		}
+	} else {
+		resolved, err := resolveShareLinkRoomID(ctx, c.roomID, c.logger)
+		if err != nil {
+			return fmt.Errorf("解析抖音分享短链失败 (https://v.douyin.com/%s/): %w", c.roomID, err)
+		}
+		realRoomID = resolved
 	}
 
 	// 生成 user_unique_id
@@ -536,6 +554,123 @@ func fetchRealRoomID(roomID, cookies string, logger *logrus.Entry) (string, erro
 
 	logger.Debug("页面中未找到 roomId，使用原始 roomID")
 	return roomID, nil
+}
+
+// isNumericRoomID 判断是否为纯数字房间号（网页版地址栏 live.douyin.com/<web_rid> 形态）
+func isNumericRoomID(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// roomIDFromRedirectURL 从短链跳转的 Location 中提取真实 roomId。
+// reflow/<id> 与 room_id=<id> 中的数字即真实 roomId；
+// live.douyin.com/<n> 中的 n 是 web_rid（需再经页面解析），返回空串交由后续跳数处理。
+func roomIDFromRedirectURL(rawURL string) string {
+	if m := reReflowRoomID.FindStringSubmatch(rawURL); len(m) == 2 {
+		return m[1]
+	}
+	if m := reRoomIDQuery.FindStringSubmatch(rawURL); len(m) == 2 {
+		return m[1]
+	}
+	return ""
+}
+
+// douyinRedirectHosts 短链跳转链允许跟随的域名后缀（抖音系 CDN/网关域名）。
+// 不限定则会把请求头发往任意主机，且落地页可能被用于探测内网。
+var douyinRedirectHosts = []string{".douyin.com", ".iesdouyin.com", ".amemv.com", ".snssdk.com"}
+
+func isDouyinFamilyURL(u *url.URL) bool {
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	for _, suffix := range douyinRedirectHosts {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	// 精确匹配裸域（v.douyin.com 已被后缀覆盖，这里防 "douyin.com" 本身作为 Host）
+	for _, domain := range []string{"douyin.com", "iesdouyin.com", "amemv.com", "snssdk.com"} {
+		if host == domain {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveShareLinkRoomID 解析 v.douyin.com 分享短链，返回真实数字 roomId。
+// 手机版抖音"分享-复制链接"得到 https://v.douyin.com/<code>/，
+// 而 recorder 侧仅取 URL path 首段作为 roomID，短链场景下拿到的是随机口令码而非房间号，
+// 必须手动逐跳跟随 302（默认跟随会落到 H5 兜底页丢失中间 Location）提取真实 roomId。
+// 调用方同步阻塞在录制启动路径上，因此用 30s 总超时兜底并响应 ctx 取消。
+func resolveShareLinkRoomID(ctx context.Context, code string, logger *logrus.Entry) (string, error) {
+	if !reShareCode.MatchString(code) {
+		return "", fmt.Errorf("非法的分享短链口令: %q", code)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	next := "https://v.douyin.com/" + code + "/"
+	for hop := 0; hop < 6 && next != ""; hop++ {
+		req, err := http.NewRequestWithContext(ctx, "GET", next, nil)
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("User-Agent", userAgent)
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", err
+		}
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			loc, uerr := resp.Location()
+			io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			if uerr != nil {
+				return "", fmt.Errorf("跳转缺少 Location: %w", uerr)
+			}
+			if !isDouyinFamilyURL(loc) {
+				return "", fmt.Errorf("短链跳转到非抖音域名: %s", loc.Host)
+			}
+			if id := roomIDFromRedirectURL(loc.String()); id != "" {
+				logger.Infof("从分享短链解析到 roomId: %s (第 %d 跳)", id, hop+1)
+				return id, nil
+			}
+			// live.douyin.com/<web_rid> 形态：web_rid 不是真实 roomId，回退到页面解析流程
+			if m := reWebRid.FindStringSubmatch(loc.String()); len(m) == 2 {
+				real, ferr := fetchRealRoomID(m[1], "", logger)
+				if ferr == nil && isNumericRoomID(real) && real != m[1] {
+					return real, nil
+				}
+				return m[1], nil
+			}
+			next = loc.String()
+			continue
+		}
+		// 非跳转响应：从页面内容兜底提取 roomIdStr
+		body, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if rerr != nil {
+			return "", rerr
+		}
+		if m := reRoomIDStr.FindSubmatch(body); len(m) == 2 {
+			logger.Infof("从分享短链落地页解析到 roomId: %s", m[1])
+			return string(m[1]), nil
+		}
+		return "", fmt.Errorf("短链跳转链中未找到房间号 (HTTP %d)", resp.StatusCode)
+	}
+	return "", fmt.Errorf("短链跳转超过最大跳数")
 }
 
 // generateSignature 生成 WebSocket 连接签名

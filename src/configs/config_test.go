@@ -186,6 +186,24 @@ func TestNormalizeLiveRoomUrl(t *testing.T) {
 	// 非别名域名原样返回
 	assert.Equal(t, "https://live.douyin.com/456", NormalizeLiveRoomUrl("https://live.douyin.com/456"))
 	assert.Equal(t, "not a url", NormalizeLiveRoomUrl("not a url"))
+	// 抖音首页 query 形态 → 规范长链
+	assert.Equal(t, "https://live.douyin.com/670024121496",
+		NormalizeLiveRoomUrl("https://live.douyin.com/?live_web_rid=670024121496"))
+	assert.Equal(t, "https://live.douyin.com/670024121496",
+		NormalizeLiveRoomUrl("https://live.douyin.com/?activity_name=x&anchor_id=123&live_web_rid=670024121496&z=1"))
+	assert.Equal(t, "https://live.douyin.com/670024121496",
+		NormalizeLiveRoomUrl("https://live.douyin.com?live_web_rid=670024121496"))
+	// 已有 path 房间号时不覆盖 query
+	assert.Equal(t, "https://live.douyin.com/456?live_web_rid=789",
+		NormalizeLiveRoomUrl("https://live.douyin.com/456?live_web_rid=789"))
+	// 无 live_web_rid / 非数字值 / 只认 live_web_rid 不认 room_id，均原样返回
+	assert.Equal(t, "https://live.douyin.com/?room_id=7688588152885267238",
+		NormalizeLiveRoomUrl("https://live.douyin.com/?room_id=7688588152885267238"))
+	assert.Equal(t, "https://live.douyin.com/?live_web_rid=abc123",
+		NormalizeLiveRoomUrl("https://live.douyin.com/?live_web_rid=abc123"))
+	assert.Equal(t, "https://live.douyin.com/?live_web_rid=",
+		NormalizeLiveRoomUrl("https://live.douyin.com/?live_web_rid="))
+	assert.Equal(t, "https://live.douyin.com/", NormalizeLiveRoomUrl("https://live.douyin.com/"))
 }
 
 // 手动编辑配置写入 m.douyu.com 房间时，加载阶段应规范化为 www.douyu.com
@@ -197,6 +215,51 @@ func TestNewConfigPostProcessNormalizesAliasRoom(t *testing.T) {
 	newConfigPostProcess(cfg)
 	assert.Equal(t, "https://www.douyu.com/9999", cfg.LiveRooms[0].Url)
 	assert.Equal(t, "https://live.douyin.com/1111", cfg.LiveRooms[1].Url)
+}
+
+// 规范化后撞成同一 URL 的存量条目（升级前保存的坏形态 + 正常长链）必须去重，避免双录
+func TestNewConfigPostProcessDedupesNormalizedRooms(t *testing.T) {
+	// 抖音：query 形态与长链并存 → 合并为一条
+	cfg := &Config{LiveRooms: []LiveRoom{
+		{Url: "https://live.douyin.com/?live_web_rid=670024121496", IsListening: true},
+		{Url: "https://live.douyin.com/670024121496", IsListening: true},
+		{Url: "https://live.douyin.com/73832228797", IsListening: true},
+	}}
+	newConfigPostProcess(cfg)
+	assert.Len(t, cfg.LiveRooms, 2)
+	assert.Equal(t, "https://live.douyin.com/670024121496", cfg.LiveRooms[0].Url)
+	assert.True(t, cfg.LiveRooms[0].IsListening)
+	assert.Equal(t, "https://live.douyin.com/73832228797", cfg.LiveRooms[1].Url)
+
+	// 斗鱼：别名形态与标准形态并存 → 合并为一条
+	cfg = &Config{LiveRooms: []LiveRoom{
+		{Url: "https://m.douyu.com/123"},
+		{Url: "https://www.douyu.com/123", IsListening: true},
+	}}
+	newConfigPostProcess(cfg)
+	assert.Len(t, cfg.LiveRooms, 1)
+	assert.Equal(t, "https://www.douyu.com/123", cfg.LiveRooms[0].Url)
+	// is_listening 任一为真即为真（先线条目 false，被后线 true 救回）
+	assert.True(t, cfg.LiveRooms[0].IsListening)
+
+	// notify_only 全部为真才为真：录制定单不被 notify_only 副本拖累
+	cfg = &Config{LiveRooms: []LiveRoom{
+		{Url: "https://live.douyin.com/111", IsListening: true},
+		{Url: "https://live.douyin.com/?live_web_rid=111", NotifyOnly: true},
+	}}
+	newConfigPostProcess(cfg)
+	assert.Len(t, cfg.LiveRooms, 1)
+	assert.False(t, cfg.LiveRooms[0].NotifyOnly)
+	assert.True(t, cfg.LiveRooms[0].IsListening)
+
+	// 两条都是 notify_only 时保持仅提醒
+	cfg = &Config{LiveRooms: []LiveRoom{
+		{Url: "https://live.douyin.com/222", NotifyOnly: true, IsListening: true},
+		{Url: "https://live.douyin.com/?live_web_rid=222", NotifyOnly: true, IsListening: true},
+	}}
+	newConfigPostProcess(cfg)
+	assert.Len(t, cfg.LiveRooms, 1)
+	assert.True(t, cfg.LiveRooms[0].NotifyOnly)
 }
 
 func TestHierarchicalConfigFromExistingConfig(t *testing.T) {

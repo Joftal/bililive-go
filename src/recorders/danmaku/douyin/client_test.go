@@ -3,6 +3,7 @@ package douyin
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"testing"
 	"time"
@@ -158,5 +159,83 @@ func testConnection(t *testing.T, roomID, cookies string) {
 				}
 			}
 		}
+	}
+}
+
+// TestShareLinkParsers 短链解析纯函数单测（不依赖网络）
+func TestShareLinkParsers(t *testing.T) {
+	if !isNumericRoomID("400604888272") || isNumericRoomID("") || isNumericRoomID("gLXTJdPjW-Y") || isNumericRoomID("12a3") {
+		t.Fatal("isNumericRoomID 判定错误")
+	}
+	// reflow 路径与 room_id query 均为真实 roomId
+	if id := roomIDFromRedirectURL("https://webcast.amemv.com/douyin/webcast/reflow/7688535243871046409?u_code=x"); id != "7688535243871046409" {
+		t.Fatalf("reflow 提取失败: %q", id)
+	}
+	if id := roomIDFromRedirectURL("https://live.douyin.com/?room_id=123&x=1"); id != "123" {
+		t.Fatalf("room_id query 提取失败: %q", id)
+	}
+	// live.douyin.com/<web_rid> 不在 redirect 提取阶段直接返回，避免误把 web_rid 当 roomId
+	if id := roomIDFromRedirectURL("https://live.douyin.com/400604888272"); id != "" {
+		t.Fatalf("web_rid 不应被当作真实 roomId: %q", id)
+	}
+	// roomIdStr 转义/非转义两种形态
+	for _, s := range []string{
+		`"roomIdStr\":\"7688535243871046409\"`,
+		`"roomIdStr":"7688535243871046409"`,
+	} {
+		m := reRoomIDStr.FindStringSubmatch(s)
+		if len(m) != 2 || m[1] != "7688535243871046409" {
+			t.Fatalf("roomIdStr 提取失败: %s", s)
+		}
+	}
+	// 跳转域名白名单
+	type hostCase struct {
+		raw  string
+		want bool
+	}
+	for _, c := range []hostCase{
+		{"https://webcast.amemv.com/douyin/webcast/reflow/1", true},
+		{"https://v.douyin.com/abc/", true},
+		{"https://live.douyin.com/123", true},
+		{"https://example.com/douyin.com/", false},
+		{"https://evil.douyin.com.attacker.net/x", false},
+		{"http://snssdk.com/x", true},
+		{"file:///etc/passwd", false},
+	} {
+		u, err := url.Parse(c.raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := isDouyinFamilyURL(u); got != c.want {
+			t.Fatalf("isDouyinFamilyURL(%s)=%v want %v", c.raw, got, c.want)
+		}
+	}
+	// 口令白名单拒绝路径穿越/非法字符
+	if reShareCode.MatchString("../x") || reShareCode.MatchString("a/b") || reShareCode.MatchString("") {
+		t.Fatal("reShareCode 白名单过松")
+	}
+	if !reShareCode.MatchString("gLXTJdPjW-Y") {
+		t.Fatal("reShareCode 拒绝了合法口令")
+	}
+}
+
+// TestOwnerShortIDRegex 验证 owner 锚定提取，不会被访客位 shortId:0 干扰
+func TestOwnerShortIDRegex(t *testing.T) {
+	escaped := `xx],"owner":{"id\":4336069736662504,\"shortId\":3511285081,\"nickname\":\"半只笨猪`
+	// 构造更接近真实落地页的全转义片段
+	escapedFull := `\"owner\":{\"id\":4336069736662504,\"shortId\":3511285081,\"nickname\":`
+	plain := `"owner":{"id":4336069736662504,"shortId":3511285081,"nickname":"x"}`
+	guest := `{"guest":{"shortId":0}}` + escapedFull
+	for _, s := range []string{escapedFull, plain, guest} {
+		m := reOwnerShortID.FindStringSubmatch(s)
+		if len(m) != 2 || m[1] != "3511285081" {
+			t.Fatalf("owner.shortId 提取失败: %s -> %v", s, m)
+		}
+	}
+	if reOwnerShortID.MatchString(escaped) {
+		t.Log("注意: 混入未转义片段仍要求匹配失败与否取决于结构，此处仅记录")
+	}
+	if m := reOwnerShortID.FindStringSubmatch(`{"owner":{"id":1,"other":{"shortId":9}},"x":1}`); m != nil {
+		t.Fatalf("不应跨出 owner 对象匹配: %v", m)
 	}
 }

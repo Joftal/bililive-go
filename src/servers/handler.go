@@ -40,6 +40,7 @@ import (
 	"github.com/bililive-go/bililive-go/src/pkg/ratelimit"
 	"github.com/bililive-go/bililive-go/src/pkg/utils"
 	"github.com/bililive-go/bililive-go/src/recorders"
+	dmdouyin "github.com/bililive-go/bililive-go/src/recorders/danmaku/douyin"
 	"github.com/bililive-go/bililive-go/src/tools"
 	"github.com/bililive-go/bililive-go/src/types"
 )
@@ -716,6 +717,42 @@ func addLiveImpl(ctx context.Context, urlStr string, isListen bool, notifyOnly b
 	u, err := url.Parse(urlStr)
 	if err != nil {
 		return nil, errors.New("can't parse url: " + urlStr)
+	}
+	// 抖音手机版分享短链入库前转为主播账号级稳定长链：短链 302 固化的房间号是分享那一刻的场次快照，
+	// 主播重新开播后即失效；转成 live.douyin.com/<web_rid> 后视频/弹幕/cookie 全链路与手工长链完全一致。
+	// 转换失败不阻断添加（保留原短链，弹幕侧还有运行时逐跳解析兜底）。
+	if u.Host == "v.douyin.com" {
+		if segs := strings.Split(strings.Trim(u.Path, "/"), "/"); len(segs) > 0 && segs[0] != "" {
+			if longURL, rerr := dmdouyin.ResolveShareLongURL(ctx, segs[0]); rerr == nil {
+				applog.GetLogger().Infof("抖音分享短链已转换为长链: %s -> %s", urlStr, longURL)
+				// 当前配置里若已按原短链入库（配置编辑器粘贴、或存量短链房间重新添加），原位迁移该条目 URL，
+				// 避免"短链条目 + 新增长链条目"双份入库导致重启后同主播重复录制
+				shortURL := urlStr
+				if _, gerr := configs.GetCurrentConfig().GetLiveRoomByUrl(shortURL); gerr == nil {
+					migrate := func(c *configs.Config) error {
+						if r, err := c.GetLiveRoomByUrl(shortURL); err == nil {
+							r.Url = longURL
+						}
+						return nil
+					}
+					var merr error
+					if persist {
+						_, merr = configs.UpdateWithRetry(migrate, 3, 10*time.Millisecond)
+					} else {
+						_, merr = configs.UpdateWithRetryTransient(migrate, 3, 10*time.Millisecond)
+					}
+					if merr != nil {
+						applog.GetLogger().Warnf("抖音短链房间迁移为长链失败: %v", merr)
+					}
+				}
+				urlStr = longURL
+				if u, err = url.Parse(urlStr); err != nil {
+					return nil, errors.New("can't parse url: " + urlStr)
+				}
+			} else {
+				applog.GetLogger().Warnf("抖音分享短链转长链失败，保留原链接: %v", rerr)
+			}
+		}
 	}
 	inst := instance.GetInstance(ctx)
 	needAppend := false
