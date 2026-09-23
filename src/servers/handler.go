@@ -30,6 +30,7 @@ import (
 	"github.com/bililive-go/bililive-go/src/instance"
 	"github.com/bililive-go/bililive-go/src/listeners"
 	"github.com/bililive-go/bililive-go/src/live"
+	dy "github.com/bililive-go/bililive-go/src/live/douyu"
 	soop "github.com/bililive-go/bililive-go/src/live/sooplive"
 	"github.com/bililive-go/bililive-go/src/livestate"
 	applog "github.com/bililive-go/bililive-go/src/log"
@@ -710,6 +711,8 @@ func addLiveImpl(ctx context.Context, urlStr string, isListen bool, notifyOnly b
 	if !strings.HasPrefix(urlStr, "http://") && !strings.HasPrefix(urlStr, "https://") {
 		urlStr = "https://" + urlStr
 	}
+	// 统一别名域名（如手机分享出来的 m.douyu.com），使其与 cookies/平台配置的 host key 对齐
+	urlStr = configs.NormalizeLiveRoomUrl(urlStr)
 	u, err := url.Parse(urlStr)
 	if err != nil {
 		return nil, errors.New("can't parse url: " + urlStr)
@@ -842,6 +845,7 @@ func batchAddLives(writer http.ResponseWriter, r *http.Request) {
 			if !strings.HasPrefix(checkURL, "http://") && !strings.HasPrefix(checkURL, "https://") {
 				checkURL = "https://" + checkURL
 			}
+			checkURL = configs.NormalizeLiveRoomUrl(checkURL)
 			if u, err := url.Parse(checkURL); err == nil {
 				if _, err := configs.GetCurrentConfig().GetLiveRoomByUrl(u.String()); err == nil {
 					event := batchProgressEvent{
@@ -3639,6 +3643,60 @@ func verifyBilibiliCookie(writer http.ResponseWriter, r *http.Request) {
 	}
 	writer.Header().Set("Content-Type", "application/json")
 	writer.Write(body)
+}
+
+// getDouyuQRCode 获取斗鱼扫码登录二维码（后端代理 passport.douyu.com，
+// 规避跨域与 WAF 对非浏览器来源请求的拦截）
+func getDouyuQRCode(writer http.ResponseWriter, r *http.Request) {
+	session, err := dy.GenerateLoginQRCode(r.Context())
+	if err != nil {
+		applog.GetLogger().WithError(err).Warn("获取斗鱼登录二维码失败")
+		writeJsonWithStatusCode(writer, http.StatusInternalServerError, commonResp{
+			ErrNo:  http.StatusInternalServerError,
+			ErrMsg: "获取斗鱼登录二维码失败: " + err.Error(),
+		})
+		return
+	}
+	writeJSON(writer, commonResp{Data: session})
+}
+
+// pollDouyuQRCode 轮询斗鱼扫码登录状态；用户在手机端确认成功后，
+// 后端自动用回调 URL 换取登录 cookie 并写入 configs.Cookies["www.douyu.com"]，
+// 同步应用到运行中的斗鱼房间（录制流请求将携带该 cookie，消除约 5 分钟的匿名断流）。
+func pollDouyuQRCode(writer http.ResponseWriter, r *http.Request) {
+	code := r.URL.Query().Get("code")
+	result, err := dy.PollLoginQRCode(r.Context(), code)
+	if err != nil {
+		applog.GetLogger().WithError(err).Warn("轮询斗鱼登录状态失败")
+		writeJsonWithStatusCode(writer, http.StatusInternalServerError, commonResp{
+			ErrNo:  http.StatusInternalServerError,
+			ErrMsg: "轮询斗鱼登录状态失败: " + err.Error(),
+		})
+		return
+	}
+
+	if result.State == dy.QRStateSuccess {
+		newCfg, err := configs.UpdateWithRetry(func(c *configs.Config) error {
+			if c.Cookies == nil {
+				c.Cookies = make(map[string]string)
+			}
+			c.Cookies[dy.CookieHost] = result.Cookie
+			return nil
+		}, 3, 10*time.Millisecond)
+		if err != nil {
+			writeJsonWithStatusCode(writer, http.StatusInternalServerError, commonResp{
+				ErrNo:  http.StatusInternalServerError,
+				ErrMsg: "斗鱼登录成功，但写入配置失败: " + err.Error(),
+			})
+			return
+		}
+		applyCookiesToLives(r.Context(), newCfg, dy.CookieHost)
+		applog.GetLogger().Infof("斗鱼扫码登录成功: uid=%s nickname=%s cookieLength=%d", result.UserID, result.Nickname, len(result.Cookie))
+	}
+
+	// 不回传原始 cookie 内容，前端需要时可经 /api/cookies 查看
+	result.Cookie = ""
+	writeJSON(writer, commonResp{Data: result})
 }
 
 // startRecordDirect 直接启动录制（绕过 Listener，适用于 NotifyOnly 房间）

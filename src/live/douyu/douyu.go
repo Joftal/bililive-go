@@ -147,6 +147,8 @@ func (l *Live) getEngineWithCryptoJS() (*otto.Otto, error) {
 type Live struct {
 	internal.BaseLive
 	roomID string
+	// did 在 Live 生命周期内固定，避免每次签名都换新设备号触发风控
+	did string
 }
 
 // GetRoomID 返回已解析的数字房间号（由 fetchRoomID 解析）。
@@ -155,12 +157,60 @@ func (l *Live) GetRoomID() string {
 	return l.roomID
 }
 
+// getCookieString 从 Options cookie jar 中读取斗鱼域名的 cookie 字符串（"k1=v1; k2=v2"）。
+// 未配置 cookie 时返回空串，调用方据此决定是否附加 Cookie 头。
+func (l *Live) getCookieString() string {
+	if l.Options == nil || l.Options.Cookies == nil {
+		return ""
+	}
+	cookies := l.Options.Cookies.Cookies(l.Url)
+	parts := make([]string, 0, len(cookies))
+	for _, c := range cookies {
+		parts = append(parts, c.Name+"="+c.Value)
+	}
+	return strings.Join(parts, "; ")
+}
+
+// getDID 返回固定的设备号：优先复用用户 cookie 中的斗鱼设备号
+// （浏览器实际使用 dy_did，登录态下 acf_did 与其一致），使签名 did
+// 与登录 cookie 保持一致、更接近浏览器行为；否则生成一次并在该 Live 生命周期内复用。
+func (l *Live) getDID() string {
+	if l.did != "" {
+		return l.did
+	}
+	if l.Options != nil && l.Options.Cookies != nil {
+		for _, c := range l.Options.Cookies.Cookies(l.Url) {
+			if (c.Name == "dy_did" || c.Name == "acf_did") && c.Value != "" {
+				l.did = c.Value
+				return l.did
+			}
+		}
+	}
+	l.did = strings.ReplaceAll(uuid.Must(uuid.NewV4()).String(), "-", "")
+	return l.did
+}
+
+// cookieRequestOption 返回带 Cookie 头的请求选项；无 cookie 时返回 nil，调用方需过滤。
+func (l *Live) cookieRequestOption() requests.RequestOption {
+	if ck := l.getCookieString(); ck != "" {
+		return requests.Header("Cookie", ck)
+	}
+	return nil
+}
+
+func (l *Live) requestOpts(opts ...requests.RequestOption) []requests.RequestOption {
+	if opt := l.cookieRequestOption(); opt != nil {
+		opts = append(opts, opt)
+	}
+	return opts
+}
+
 func (l *Live) fetchRoomID() error {
 	if l.roomID != "" {
 		return nil
 	}
 	var body []byte
-	resp, err := l.RequestSession.Get(l.Url.String(), live.CommonUserAgent)
+	resp, err := l.RequestSession.Get(l.Url.String(), l.requestOpts(live.CommonUserAgent)...)
 	if err != nil {
 		return errors.New("request failed. error: " + err.Error())
 	}
@@ -214,7 +264,7 @@ func (l *Live) GetInfo() (info *live.Info, err error) {
 		}
 
 	}
-	resp, err := l.RequestSession.Get(fmt.Sprintf("%s/%s", liveInfoUrl, l.roomID), live.CommonUserAgent)
+	resp, err := l.RequestSession.Get(fmt.Sprintf("%s/%s", liveInfoUrl, l.roomID), l.requestOpts(live.CommonUserAgent)...)
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +287,7 @@ func (l *Live) GetInfo() (info *live.Info, err error) {
 }
 
 func (l *Live) getSignParams() (map[string]string, error) {
-	resp, err := l.RequestSession.Get(liveEncUrl, live.CommonUserAgent, requests.Query("rids", l.roomID))
+	resp, err := l.RequestSession.Get(liveEncUrl, l.requestOpts(live.CommonUserAgent, requests.Query("rids", l.roomID))...)
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +344,7 @@ func (l *Live) getSignParams() (map[string]string, error) {
 	if _, err := engine.Eval(jsDebug); err != nil {
 		return nil, err
 	}
-	did := strings.ReplaceAll(uuid.Must(uuid.NewV4()).String(), "-", "")
+	did := l.getDID()
 	ts := time.Now()
 	res, err := engine.Call("ub98484234", nil, l.roomID, did, ts.Unix())
 	if err != nil {
@@ -320,7 +370,7 @@ func (l *Live) getSignParams() (map[string]string, error) {
 	return values, nil
 }
 
-func (l *Live) GetStreamUrls() (us []*url.URL, err error) {
+func (l *Live) GetStreamInfos() (infos []*live.StreamUrlInfo, err error) {
 	if err := l.fetchRoomID(); err != nil {
 		return nil, err
 	}
@@ -330,10 +380,12 @@ func (l *Live) GetStreamUrls() (us []*url.URL, err error) {
 	}
 	resp, err := l.RequestSession.Post(
 		fmt.Sprintf("%s/%s", liveAPIUrl, l.roomID),
-		requests.Form(params),
-		requests.Header("origin", "https://www.douyu.com"),
-		requests.Referer(l.GetRawUrl()),
-		live.CommonUserAgent,
+		l.requestOpts(
+			requests.Form(params),
+			requests.Header("origin", "https://www.douyu.com"),
+			requests.Referer(l.GetRawUrl()),
+			live.CommonUserAgent,
+		)...,
 	)
 	if err != nil {
 		return nil, err
@@ -347,14 +399,57 @@ func (l *Live) GetStreamUrls() (us []*url.URL, err error) {
 		return nil, err
 	}
 	if errorInt := gjson.GetBytes(body, "error").Int(); errorInt != 0 {
-		return nil, fmt.Errorf("GetStreamUrls() failed, error: %d", errorInt)
+		return nil, fmt.Errorf("GetStreamInfos() failed, error: %d", errorInt)
 	}
-	return utils.GenUrls(
+	us, err := utils.GenUrls(
 		fmt.Sprintf("%s/%s",
 			gjson.GetBytes(body, "data.rtmp_url").String(),
 			gjson.GetBytes(body, "data.rtmp_live").String(),
 		),
 	)
+	if err != nil {
+		return nil, err
+	}
+
+	// 下载直播流时同样携带 Cookie/Referer：带登录态 cookie 时斗鱼 CDN 不再
+	// 按约 5 分钟周期性切断匿名流，从而避免一次直播被切成大量碎片分段。
+	headers := map[string]string{
+		"Referer": l.GetRawUrl(),
+	}
+	if ck := l.getCookieString(); ck != "" {
+		headers["Cookie"] = ck
+	}
+
+	for _, u := range us {
+		format := "flv"
+		if strings.Contains(u.Path, "m3u8") {
+			format = "hls"
+		}
+		infos = append(infos, &live.StreamUrlInfo{
+			Url:                  u,
+			Name:                 "原画",
+			Quality:              "原画",
+			Format:               format,
+			HeadersForDownloader: headers,
+			AttributesForStreamSelect: map[string]string{
+				"画质": "原画",
+			},
+		})
+	}
+	return infos, nil
+}
+
+// Deprecated: 使用 GetStreamInfos 代替
+func (l *Live) GetStreamUrls() (us []*url.URL, err error) {
+	infos, err := l.GetStreamInfos()
+	if err != nil {
+		return nil, err
+	}
+	us = make([]*url.URL, 0, len(infos))
+	for _, info := range infos {
+		us = append(us, info.Url)
+	}
+	return us, nil
 }
 
 func (l *Live) GetPlatformCNName() string {

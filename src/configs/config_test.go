@@ -181,6 +181,24 @@ func TestSetCookieDeletesEmptyCookie(t *testing.T) {
 	assert.False(t, exists)
 }
 
+func TestNormalizeLiveRoomUrl(t *testing.T) {
+	assert.Equal(t, "https://www.douyu.com/123", NormalizeLiveRoomUrl("https://m.douyu.com/123"))
+	// 非别名域名原样返回
+	assert.Equal(t, "https://live.douyin.com/456", NormalizeLiveRoomUrl("https://live.douyin.com/456"))
+	assert.Equal(t, "not a url", NormalizeLiveRoomUrl("not a url"))
+}
+
+// 手动编辑配置写入 m.douyu.com 房间时，加载阶段应规范化为 www.douyu.com
+func TestNewConfigPostProcessNormalizesAliasRoom(t *testing.T) {
+	cfg := &Config{LiveRooms: []LiveRoom{
+		{Url: "https://m.douyu.com/9999"},
+		{Url: "https://live.douyin.com/1111"},
+	}}
+	newConfigPostProcess(cfg)
+	assert.Equal(t, "https://www.douyu.com/9999", cfg.LiveRooms[0].Url)
+	assert.Equal(t, "https://live.douyin.com/1111", cfg.LiveRooms[1].Url)
+}
+
 func TestHierarchicalConfigFromExistingConfig(t *testing.T) {
 	// 使用内联配置字符串测试层级配置功能，不依赖外部 config.yml 文件
 	hierarchicalConfigYaml := `

@@ -361,6 +361,21 @@ class API {
     }
 
     /**
+     * 获取斗鱼扫码登录二维码（后端代理）
+     */
+    getDouyuQRCode() {
+        return utils.requestGet(`${BASE_URL}/douyu/qrcode`);
+    }
+
+    /**
+     * 轮询斗鱼扫码登录状态；确认成功后后端自动保存 Cookie
+     * @param code 二维码会话 code
+     */
+    pollDouyuQRCode(code: string) {
+        return utils.requestGet(`${BASE_URL}/douyu/qrcode/poll?code=${encodeURIComponent(code)}`);
+    }
+
+    /**
      * 获取 SoopLive 已保存的账号密码配置
      */
     getSoopLiveAuth() {

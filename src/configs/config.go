@@ -1086,6 +1086,12 @@ func newConfigPostProcess(c *Config) {
 	if c.AppDataPath == "" {
 		c.AppDataPath = filepath.Join(c.OutPutPath, ".appdata")
 	}
+	// 规范化手动编辑配置写入的别名域名房间（如 m.douyu.com → www.douyu.com），
+	// 保证 cookies/平台配置按统一 host 命中。LiveId 是不持久化的瞬时字段（yaml:"-"），
+	// 加载阶段恒为空，改写 URL 不会与任何已缓存的 LiveId 失配。
+	for i := range c.LiveRooms {
+		c.LiveRooms[i].Url = NormalizeLiveRoomUrl(c.LiveRooms[i].Url)
+	}
 }
 
 // configMinimal 是配置文件的最小子集，仅包含 launcher 决策所需的字段。
@@ -1450,6 +1456,26 @@ func (r *ResolvedConfig) applyOverrides(override *OverridableConfig) {
 	if override.Danmaku != nil {
 		r.Danmaku = mergeDanmakuConfig(&r.Danmaku, override.Danmaku)
 	}
+}
+
+// roomUrlHostAliases 房间 URL 的 host 别名表：把移动端/备用入口域名统一为平台标准域名，
+// 使 cookies、平台层级配置、房间查找等所有按 host 索引的链路只需认一个 key。
+var roomUrlHostAliases = map[string]string{
+	"m.douyu.com": "www.douyu.com",
+}
+
+// NormalizeLiveRoomUrl 将房间 URL 中命中的别名 host 替换为标准 host（如 m.douyu.com → www.douyu.com）。
+// 解析失败或 host 不在别名表时原样返回。
+func NormalizeLiveRoomUrl(urlStr string) string {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return urlStr
+	}
+	if std, ok := roomUrlHostAliases[u.Host]; ok {
+		u.Host = std
+		return u.String()
+	}
+	return urlStr
 }
 
 // PlatformKeyDouyin 抖音的平台键。抖音的直播间解析依赖本地 bililive-tools 服务，
