@@ -49,8 +49,11 @@ class EditCookieDialog extends React.Component<IProps> {
      * 斗鱼扫码登录成功后，后端已自动落盘新 cookie（轮询接口不回传原文）。
      * 这里重新拉取 /api/cookies，把显示文本与"未修改"基准一起刷新为新值，
      * 避免用户基于旧文本编辑保存、覆盖新登录态。
+     * 同时通知父组件刷新 Cookie 列表：斗鱼面板没有"保存"按钮，用户扫完通常直接关闭弹窗，
+     * 若不刷新，列表上那枚"需重新扫码"红标会一直挂着（续期失败的可视化提示就无法自动撤销）。
      */
     handleDouyuScanSuccess = async () => {
+        this.props.refresh();
         try {
             const list: any = await this.api.getCookieList();
             const entries = Array.isArray(list) ? list : [];
@@ -148,7 +151,8 @@ class EditCookieDialog extends React.Component<IProps> {
                     onCancel={this.handleCancel}
                     width={(isBili || isSoop || isDouyu) ? 720 : 520}
                     okText="保存并生效"
-                    cancelText="取消"
+                    cancelText={isDouyu ? '关闭' : '取消'}
+                    okButtonProps={isDouyu ? { style: { display: 'none' } } : undefined}
                     destroyOnClose
                 >
                     {isBili ? (

@@ -14,6 +14,7 @@ require (
 	github.com/getsentry/sentry-go v0.31.1
 	github.com/go-delve/delve v1.26.0
 	github.com/golang-migrate/migrate/v4 v4.19.1
+	github.com/google/uuid v1.6.0
 	github.com/gorilla/mux v1.7.4
 	github.com/gorilla/websocket v1.5.3
 	github.com/hr3lxphr6j/requests v0.0.1
@@ -67,7 +68,6 @@ require (
 	github.com/google/go-dap v0.12.0 // indirect
 	github.com/google/jsonschema-go v0.3.0 // indirect
 	github.com/google/pprof v0.0.0-20250317173921-a4b03ec1a45e // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/huandu/xstrings v1.3.2 // indirect
 	github.com/imdario/mergo v0.3.11 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect

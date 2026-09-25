@@ -317,6 +317,7 @@ interface IState {
     sortedInfo: { columnKey: string | null; order: 'ascend' | 'descend' | null }, // 表格排序状态
     danmakuMessages: { [key: string]: DanmakuMessage[] }, // roomId -> 弹幕消息列表
     expandedActiveTabs: { [key: string]: string }, // roomId -> 当前激活的 tab key
+    douyuNeedRescan: boolean, // 斗鱼 cookie 自动续期已失败，需重新扫码
 }
 
 interface ItemData {
@@ -571,7 +572,19 @@ class LiveList extends React.Component<Props, IState> {
             title: '直播平台',
             dataIndex: 'livename',
             key: 'livename',
-            render: (name: string, data: CookieItemData) => data.Platform_cn_name + '(' + data.Host + ')'
+            render: (name: string, data: CookieItemData) => {
+                const isDouyu = data.Host === 'www.douyu.com' || data.Host === 'douyu.com';
+                return (
+                    <span>
+                        {data.Platform_cn_name + '(' + data.Host + ')'}
+                        {isDouyu && this.state.douyuNeedRescan && (
+                            <Tooltip title="斗鱼登录 Cookie 自动续期已失败（长期凭证失效），录制将退回匿名录制，请点击右侧按钮重新扫码登录">
+                                <Tag color="red" style={{ marginLeft: 8 }}>需重新扫码</Tag>
+                            </Tooltip>
+                        )}
+                    </span>
+                );
+            }
         }, {
             title: 'Cookie',
             dataIndex: 'Cookie',
@@ -626,6 +639,7 @@ class LiveList extends React.Component<Props, IState> {
             sortedInfo: savedSortedInfo,
             danmakuMessages: {},
             expandedActiveTabs: {},
+            douyuNeedRescan: false,
         }
     }
 
@@ -1012,12 +1026,20 @@ class LiveList extends React.Component<Props, IState> {
 
     requestCookieData() {
         api.getCookieList()
-            .then(function (rsp: any) {
-                return rsp
-            }).then((data: CookieItemData[]) => {
-                this.setState({
-                    cookieList: data
-                });
+            .then((data: any) => {
+                this.setState({ cookieList: Array.isArray(data) ? data : [] });
+            })
+            .catch(err => {
+                // 与 requestListData 不同，这里原先没有 catch：网络异常时是未处理的 Promise rejection
+                console.error(`加载 Cookie 列表失败:\n${err}`);
+            })
+        // 顺带拉取斗鱼自动续期状态，续期失败时在列表上给出可见提醒
+        api.getDouyuAuthStatus()
+            .then((res: any) => {
+                this.setState({ douyuNeedRescan: !!(res && res.err_no === 0 && res.data && res.data.need_rescan) });
+            })
+            .catch(() => {
+                // 旧后端无此接口时忽略，不影响 cookie 列表本身
             })
     }
 

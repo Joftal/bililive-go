@@ -2,17 +2,20 @@ package douyu
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 
 	"github.com/hr3lxphr6j/requests"
 
+	"github.com/bililive-go/bililive-go/src/configs"
 	"github.com/bililive-go/bililive-go/src/live"
 	"github.com/bililive-go/bililive-go/src/live/internal"
 	"github.com/bililive-go/bililive-go/src/pkg/utils"
@@ -147,8 +150,10 @@ func (l *Live) getEngineWithCryptoJS() (*otto.Otto, error) {
 type Live struct {
 	internal.BaseLive
 	roomID string
-	// did 在 Live 生命周期内固定，避免每次签名都换新设备号触发风控
-	did string
+	// did 在 Live 生命周期内固定，避免每次签名都换新设备号触发风控；
+	// 读取自签名路径、重置自配置热更新，故需加锁。
+	didMu sync.Mutex
+	did   string
 }
 
 // GetRoomID 返回已解析的数字房间号（由 fetchRoomID 解析）。
@@ -157,10 +162,21 @@ func (l *Live) GetRoomID() string {
 	return l.roomID
 }
 
+// loginCookieUsable 报告当前这份斗鱼登录 cookie 是否还值得作为"登录态"发出去。
+// 自动续期一旦已不可能把这份 cookie 救回来（见 LoginCookieKnownExpired），就主动停用，
+// 让取流请求回到"从未登录过"那条行为已验证的路径上，而不是继续赌服务端会忽略非法登录字段。
+func loginCookieUsable() bool {
+	cfg := configs.GetCurrentConfig()
+	if cfg == nil {
+		return true
+	}
+	return !LoginCookieKnownExpired(cfg.DouyuAuth.LTP0, cfg.DouyuAuth.LastRenewSuccessAt, time.Now())
+}
+
 // getCookieString 从 Options cookie jar 中读取斗鱼域名的 cookie 字符串（"k1=v1; k2=v2"）。
-// 未配置 cookie 时返回空串，调用方据此决定是否附加 Cookie 头。
+// 未配置 cookie、或这份登录态已确凿失效时返回空串，调用方据此决定是否附加 Cookie 头。
 func (l *Live) getCookieString() string {
-	if l.Options == nil || l.Options.Cookies == nil {
+	if l.Options == nil || l.Options.Cookies == nil || !loginCookieUsable() {
 		return ""
 	}
 	cookies := l.Options.Cookies.Cookies(l.Url)
@@ -171,23 +187,91 @@ func (l *Live) getCookieString() string {
 	return strings.Join(parts, "; ")
 }
 
+// deviceIDCookieKeys 是斗鱼侧设备标识字段，按优先级排列（cookiejar 返回顺序不稳定，不能"取先命中的"）。
+// 这张表同时供续期写回侧判定设备号该丢还是该补种（见 ApplyDeviceIDPolicy）：
+// "取来签名"与"续期时取舍"必须共用同一处定义，否则加一个字段就要漏改一处。
+var deviceIDCookieKeys = []string{"dy_did", "acf_did", "acf_devid"}
+
+// isDeviceIDCookieKey 报告字段名是否为设备标识字段。
+func isDeviceIDCookieKey(name string) bool {
+	for _, k := range deviceIDCookieKeys {
+		if k == name {
+			return true
+		}
+	}
+	return false
+}
+
+// HasStoredDeviceID 报告这份 cookie 串里是否已有非空的设备标识字段。
+func HasStoredDeviceID(cookie string) bool {
+	fields := configs.ParseCookieFields(cookie)
+	for _, k := range deviceIDCookieKeys {
+		if fields[k] != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// ApplyDeviceIDPolicy 决定一次续期换到的字段里，设备号该丢掉还是该落盘（唯一决策点，返回副本）。
+//   - 现有登录 cookie 里已经有设备号：挡掉换票链这次签发的新值。设备号在扫码那次就定下并长期沿用，
+//     跟着续期轮换等于每 3 天换一台"新设备"，是签名侧最要避免的风控诱因。
+//   - 现有 cookie 里一个设备号都没有（手改配置删掉了整行、或那次扫码未下发）：把新值补种进去。
+//     否则签名侧只能自行生成随机 did，而续期热应用会作废该缓存，实测表现为每次续期换一个设备号——
+//     带着登录 cookie 却每次换设备，比"设备号来自续期"更可疑。补种一次之后即落入上一条分支，自动稳定。
+func ApplyDeviceIDPolicy(storedCookie string, fields map[string]string) map[string]string {
+	hasStored := HasStoredDeviceID(storedCookie)
+	out := make(map[string]string, len(fields))
+	for k, v := range fields {
+		if hasStored && isDeviceIDCookieKey(k) {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
 // getDID 返回固定的设备号：优先复用用户 cookie 中的斗鱼设备号
-// （浏览器实际使用 dy_did，登录态下 acf_did 与其一致），使签名 did
+// （扫码链是纯 HTTP、不执行页面 JS，拿不到浏览器用的 dy_did，实际下发的设备号是 acf_devid；
+// 浏览器自己登录时则通常有 dy_did），使签名 did
 // 与登录 cookie 保持一致、更接近浏览器行为；否则生成一次并在该 Live 生命周期内复用。
+// 注意：设备号与"登录态是否还可用"无关（斗鱼侧设备号本身不过期），所以即使登录 cookie 已被
+// 停用（getCookieString 返回空），这里仍延用它——换成一个随机 did 反而更像一台新设备。
 func (l *Live) getDID() string {
+	l.didMu.Lock()
+	defer l.didMu.Unlock()
 	if l.did != "" {
 		return l.did
 	}
 	if l.Options != nil && l.Options.Cookies != nil {
+		found := make(map[string]string, len(deviceIDCookieKeys))
 		for _, c := range l.Options.Cookies.Cookies(l.Url) {
-			if (c.Name == "dy_did" || c.Name == "acf_did") && c.Value != "" {
-				l.did = c.Value
+			if c.Value != "" {
+				found[c.Name] = c.Value
+			}
+		}
+		for _, name := range deviceIDCookieKeys {
+			if v := found[name]; v != "" {
+				l.did = v
 				return l.did
 			}
 		}
 	}
 	l.did = strings.ReplaceAll(uuid.Must(uuid.NewV4()).String(), "-", "")
 	return l.did
+}
+
+// UpdateLiveOptionsbyConfig 热更新房间选项（重新扫码、自动续期换了 cookie）后作废已缓存的设备号。
+// did 优先复用登录 cookie 里的斗鱼设备号，若一直沿用首次的值，换号之后签名里的 did
+// 仍是上一份登录态的设备号，与新 cookie 不匹配（表现为偶发签名被拒、退回匿名录制）。
+func (l *Live) UpdateLiveOptionsbyConfig(ctx context.Context, room *configs.LiveRoom) error {
+	if err := l.BaseLive.UpdateLiveOptionsbyConfig(ctx, room); err != nil {
+		return err
+	}
+	l.didMu.Lock()
+	defer l.didMu.Unlock()
+	l.did = ""
+	return nil
 }
 
 // cookieRequestOption 返回带 Cookie 头的请求选项；无 cookie 时返回 nil，调用方需过滤。

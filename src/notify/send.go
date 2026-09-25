@@ -385,6 +385,17 @@ func SendPipelineRecordingSummary(
 	sendToAllChannels(cfg, logger, title, body)
 }
 
+// SendSystemAlert 发送一条"系统级"告警（非房间开播/下播事件），
+// 走用户已配置的全部通知渠道（Telegram/Email/Bark/ntfy/wxpusher）。
+// 未配置任何渠道时静默无操作。用于如"斗鱼登录失效需重新扫码"这类全局提醒。
+func SendSystemAlert(title, body string) {
+	cfg := configs.GetCurrentConfig()
+	if cfg == nil {
+		return
+	}
+	sendToAllChannels(cfg, livelogger.New(0, nil), title, body)
+}
+
 // sendToAllChannels 向所有已启用的通知通道推送摘要消息
 func sendToAllChannels(cfg *configs.Config, logger *livelogger.LiveLogger, title, body string) {
 	// Telegram

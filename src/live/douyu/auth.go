@@ -48,9 +48,12 @@ type QRLoginState string
 const (
 	QRStateWaiting  QRLoginState = "waiting"  // 客户端还未扫码
 	QRStateScanned  QRLoginState = "scanned"  // 已扫码，等待手机端确认
-	QRStateSuccess  QRLoginState = "success"  // 确认成功，已换取登录 cookie
+	QRStateSuccess  QRLoginState = "success"  // 确认成功，已换取并保存登录 cookie
 	QRStateExpired  QRLoginState = "expired"  // 二维码失效/被取消
 	QRStateRejected QRLoginState = "rejected" // 手机端拒绝授权
+	// QRStateSaveFailed 表示"手机端已确认登录，但后端保存配置失败"（磁盘满/配置只读等）。
+	// 必须与"轮询本身失败"区分：前者反复重扫也没用，要先解决配置可写。
+	QRStateSaveFailed QRLoginState = "save_failed"
 )
 
 // QRLoginSession 一次扫码登录会话
@@ -60,12 +63,16 @@ type QRLoginSession struct {
 	Expire int    `json:"expire"` // 有效期（秒）
 }
 
-// QRPollResult 轮询结果；成功时附带登录 cookie 与用户信息
+// QRPollResult 轮询结果；成功时附带登录 cookie 与用户信息。
+// Cookie/LTP0/DyDid 一律 json:"-"：它们只用于后端内部传递（写配置、续期），
+// 绝不能出现在任何 JSON 响应里——pollDouyuQRCode 在 writeJSON 前会显式置空作为第二道保险。
 type QRPollResult struct {
 	State    QRLoginState `json:"state"`
 	Nickname string       `json:"nickname,omitempty"`
 	UserID   string       `json:"uid,omitempty"`
-	Cookie   string       `json:"cookie,omitempty"` // 仅成功时有值
+	LTP0     string       `json:"-"` // passport 域长期凭证，用于后续 safeAuth 自动续期
+	DyDid    string       `json:"-"` // 可选设备 id，随 LTP0 一起持久化
+	Cookie   string       `json:"-"` // 仅成功时有值，由后端直接落盘
 	Msg      string       `json:"msg,omitempty"`
 }
 
@@ -113,7 +120,7 @@ func PollLoginQRCode(ctx context.Context, code string) (*QRPollResult, error) {
 	req.Header.Set("User-Agent", douyuWebUAString)
 	req.Header.Set("Referer", qrLoginReferer)
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	body, err := doDouyuRequest(req)
+	body, pollCookies, err := doDouyuRequestWithCookies(req)
 	if err != nil {
 		return nil, err
 	}
@@ -145,11 +152,22 @@ func PollLoginQRCode(ctx context.Context, code string) (*QRPollResult, error) {
 				}
 			}
 		}
+		// LTP0 由轮询 error=0 响应的 Set-Cookie 下发（passport 域），是后续续期的关键长期凭证
+		ltp0 := cookieFromList(pollCookies, "LTP0")
+		if ltp0 == "" {
+			ltp0 = cookieValue(cookie, "LTP0")
+		}
+		dyDid := cookieFromList(pollCookies, "dy_did")
+		if dyDid == "" {
+			dyDid = cookieValue(cookie, "dy_did")
+		}
 		return &QRPollResult{
 			State:    QRStateSuccess,
 			Nickname: nickname,
 			UserID:   userID,
 			Cookie:   cookie,
+			LTP0:     ltp0,
+			DyDid:    dyDid,
 		}, nil
 	case 1:
 		return &QRPollResult{State: QRStateScanned, Msg: msg}, nil
@@ -164,12 +182,33 @@ func PollLoginQRCode(ctx context.Context, code string) (*QRPollResult, error) {
 
 // doDouyuRequest 执行一次斗鱼上游请求并返回响应体（限制 1MB）
 func doDouyuRequest(req *http.Request) ([]byte, error) {
+	body, _, err := doDouyuRequestWithCookies(req)
+	return body, err
+}
+
+// doDouyuRequestWithCookies 与 doDouyuRequest 相同，但额外返回响应的 Set-Cookie，
+// 供扫码成功时提取 passport 域 LTP0 等长期凭证。
+func doDouyuRequestWithCookies(req *http.Request) ([]byte, []*http.Cookie, error) {
 	resp, err := douyuHTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
-	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, nil, err
+	}
+	return body, resp.Cookies(), nil
+}
+
+// cookieFromList 从 http.Cookie 列表中取指定字段的值
+func cookieFromList(cookies []*http.Cookie, name string) string {
+	for _, c := range cookies {
+		if c.Name == name {
+			return c.Value
+		}
+	}
+	return ""
 }
 
 // exchangeLoginCookie 请求登录成功回调 URL（JSONP），从 Set-Cookie 收集登录态。
@@ -180,8 +219,8 @@ func exchangeLoginCookie(ctx context.Context, rawUrl string) (cookie string, jso
 	if err = checkDouyuURL(rawUrl); err != nil {
 		return "", "", "", err
 	}
-	seen := make(map[string]bool) // 已收集的 k=v，兼做去重
-	var hops []string             // 跳转链诊断信息（仅记录 cookie 名，不记录值）
+	seen := make(map[string]string) // 字段名 -> 值，后一跳覆盖前一跳（终点才是权威登录态）
+	var hops []string               // 跳转链诊断信息（仅记录 cookie 名，不记录值）
 	cur := rawUrl
 	var finalBody string
 	for hop := 0; hop < 8; hop++ {
@@ -197,10 +236,19 @@ func exchangeLoginCookie(ctx context.Context, rawUrl string) (cookie string, jso
 		}
 		names := make([]string, 0, len(resp.Cookies()))
 		for _, c := range resp.Cookies() {
-			seen[c.Name+"="+c.Value] = true
 			names = append(names, c.Name)
+			// 空值 Set-Cookie 是"清除该 cookie"的写法，不值得写入登录态；缺失会让下游字段保持更早的有效值
+			if c.Value == "" {
+				continue
+			}
+			seen[c.Name] = c.Value
 		}
-		hops = append(hops, fmt.Sprintf("%s -> %d (Set-Cookie: %v)", cur, resp.StatusCode, names))
+		// 一次性登录 token 就在 query 里，这条诊断串会随错误冒泡到前端与日志，只保留 scheme://host/path
+		hopURL := cur
+		if u, e := url.Parse(cur); e == nil {
+			hopURL = u.Scheme + "://" + u.Host + u.Path
+		}
+		hops = append(hops, fmt.Sprintf("%s -> %d (Set-Cookie: %v)", hopURL, resp.StatusCode, names))
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 			loc, _ := resp.Location()
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -223,10 +271,7 @@ func exchangeLoginCookie(ctx context.Context, rawUrl string) (cookie string, jso
 		finalBody = string(body)
 		break
 	}
-	parts := make([]string, 0, len(seen))
-	for kv := range seen {
-		parts = append(parts, kv)
-	}
+	parts := sortedCookiePairs(seen)
 	trace = strings.Join(hops, "; ") + "; 终点响应体: " + truncateForLog([]byte(finalBody))
 	return strings.Join(parts, "; "), stripJSONP(finalBody), trace, nil
 }

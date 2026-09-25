@@ -110,6 +110,7 @@ func initMux(ctx context.Context) *mux.Router {
 	// Douyu Login
 	apiRoute.HandleFunc("/douyu/qrcode", getDouyuQRCode).Methods("GET")
 	apiRoute.HandleFunc("/douyu/qrcode/poll", pollDouyuQRCode).Methods("GET")
+	apiRoute.HandleFunc("/douyu/auth/status", getDouyuAuthStatus).Methods("GET")
 	apiRoute.HandleFunc("/sooplive/auth", getSoopLiveAuthConfig).Methods("GET")
 	apiRoute.HandleFunc("/sooplive/auth", clearSoopLiveAuthConfig).Methods("DELETE")
 	apiRoute.HandleFunc("/sooplive/login", loginSoopLive).Methods("POST")

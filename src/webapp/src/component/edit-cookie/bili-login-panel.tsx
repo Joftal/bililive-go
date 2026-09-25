@@ -5,6 +5,9 @@ import './edit-cookie.css';
 
 const { TextArea } = Input;
 
+// 与后端 biliLoginCookieNames 保持一致，顺序即拼出的 Cookie 顺序
+const BILI_COOKIE_FIELDS = ['DedeUserID', 'DedeUserID__ckMd5', 'SESSDATA', 'bili_jct', 'sid'];
+
 interface BiliLoginPanelProps {
     initialCookie: string;
     onCookieChange: (cookie: string) => void;
@@ -54,27 +57,24 @@ const BiliLoginPanel: React.FC<BiliLoginPanelProps> = ({ initialCookie, onCookie
             });
     }, [api]);
 
-    const processLoginSuccess = useCallback((urlStr: string) => {
-        try {
-            const urlObj = new URL(urlStr);
-            const params = urlObj.searchParams;
-            const cookies = [
-                `DedeUserID=${params.get('DedeUserID')}`,
-                `DedeUserID__ckMd5=${params.get('DedeUserID__ckMd5')}`,
-                `SESSDATA=${params.get('SESSDATA')}`,
-                `bili_jct=${params.get('bili_jct')}`,
-                `sid=${params.get('sid')}`,
-            ];
-            // Filter out null values and join
-            const cookieStr = cookies.filter(c => !c.includes('null')).join('; ') + ';';
-            setTextView(cookieStr);
-            onCookieChangeRef.current(cookieStr);
-            // Auto verify after success
-            verifyCookie(cookieStr);
-        } catch (e) {
-            console.error(e);
-            notification.error({ message: '解析结果失败' });
+    const processLoginSuccess = useCallback((data: any) => {
+        // 后端已把 B 站 Set-Cookie 下发的登录字段整理进 data.cookies；data.url 只是跳转地址，不含凭证
+        const received = (data && data.cookies) || {};
+        if (!received.SESSDATA) {
+            notification.error({
+                message: '登录响应未返回 Cookie 凭证',
+                description: '请输入框内仍是旧 Cookie，未点保存不会覆盖。可关闭后重试，或按下方教程手动粘贴 Cookie。',
+            });
+            return;
         }
+        const cookieStr = BILI_COOKIE_FIELDS
+            .filter(name => received[name])
+            .map(name => `${name}=${received[name]}`)
+            .join('; ') + ';';
+        setTextView(cookieStr);
+        onCookieChangeRef.current(cookieStr);
+        // Auto verify after success
+        verifyCookie(cookieStr);
     }, [verifyCookie]);
 
     const startPolling = useCallback((key: string) => {
@@ -89,7 +89,7 @@ const BiliLoginPanel: React.FC<BiliLoginPanelProps> = ({ initialCookie, onCookie
                             clearInterval(pollTimerRef.current);
                             setLoginStatus('success');
                             setLoginMsg('登录成功！');
-                            processLoginSuccess(data.url);
+                            processLoginSuccess(data);
                         } else if (data.code === 86101) {
                             setLoginStatus('active');
                             setLoginMsg('等待扫描...');

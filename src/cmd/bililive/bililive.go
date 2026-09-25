@@ -276,7 +276,7 @@ func main() {
 		logger.Debugf("flag: %s used.", os.Args)
 	}
 	logger.Debugf("%+v", consts.GetAppInfo())
-	logger.Debugf("%+v", configs.GetCurrentConfig())
+	logger.Debugf("%+v", configs.CloneForLog(configs.GetCurrentConfig()))
 
 	// 提前声明信号通道，以便后续 OnShutdownRequest 闭包可以引用它
 	c := make(chan os.Signal, 1)
@@ -558,6 +558,10 @@ func main() {
 
 	// 异步检测并（按需）下载 FFmpeg，不阻塞启动流程
 	tools.FFmpegAsyncInit(ctx)
+
+	// 启动斗鱼 cookie 后台自动续期（仅在存有 LTP0 长期凭证时实际发起 safeAuth 换票，
+	// 与 Web RPC 是否启用无关，保证无界面后台录制也能长期保持登录态）
+	servers.StartDouyuCookieKeeper(ctx)
 
 	// 工具链是异步初始化的，WebUI 会先于工具就绪启动。
 	// 注册就绪检查，让依赖外部工具的平台（抖音依赖 bililive-tools）在工具可用之前
