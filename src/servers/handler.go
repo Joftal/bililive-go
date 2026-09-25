@@ -1084,76 +1084,34 @@ func putRawConfig(writer http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	curConfig := configs.GetCurrentConfig()
-	if curConfig == nil {
+	// snapshot 是本次保存的基准（用户打开明文页时所见的配置），只用来判断"这一处用户改没改"。
+	// 真正与提交结果比较的是 prevConfig（提交时刻的配置），见下面的三方合并说明。
+	snapshot := configs.GetCurrentConfig()
+	if snapshot == nil {
 		writeJsonWithStatusCode(writer, http.StatusInternalServerError, commonResp{
 			ErrNo:  http.StatusInternalServerError,
 			ErrMsg: "配置尚未加载",
 		})
 		return
 	}
-	// 在副本上刷新索引：配置是不可变快照，直接在 GetCurrentConfig() 返回的共享对象上
-	// 调 RefreshLiveRoomIndexCache 会就地改写一份正被所有并发请求读取的 map
-	// （Go 运行时 fatal error: concurrent map read and map write）。
-	// CloneConfigShallow 会连 liveRoomIndexCache 一起换新 map，所以在副本上刷新是安全的。
-	oldConfig := configs.CloneConfigShallow(curConfig)
-	oldConfig.RefreshLiveRoomIndexCache()
-	// 明文页提交的是"整份配置"，但"文档里根本没写这一节"与"写了但留空"含义不同：前者极可能是旧前端
-	// 缓存或局部提交的客户端（它不认识斗鱼登录字段），后者才是用户显式清空。不区分的话，一次普通保存
-	// 就把不可再生的长期凭证连同续期日程静默抹掉，表现为自动续期永久失效且没有任何提示（只能重新扫码）。
-	// 实测：把 GET /raw-config 的响应体原样提交回去（YAML 里两节都缺）即可复现。
 	topKeys := rawConfigTopKeys(rawYaml)
 	_, authSectionEdited := topKeys["douyu_auth"]
 	_, cookiesSectionEdited := topKeys["cookies"]
-	if !authSectionEdited {
-		newConfig.DouyuAuth = oldConfig.DouyuAuth
-	}
-	// "设置明文"页展示的是掩码，保存回来的仍是掩码：此时沿用原票据，
-	// 否则"打开明文页点一次保存"就会抹掉长期凭证，表现为自动续期悄悄失效。
-	// 需要真正清除时，保留 douyu_auth 这一节并把 ltp0 留空即可（整节删掉视为"未修改"）。
-	if newConfig.DouyuAuth.LTP0 == douyuSecretMask {
-		newConfig.DouyuAuth.LTP0 = oldConfig.DouyuAuth.LTP0
-	}
-	if newConfig.DouyuAuth.DyDid == douyuSecretMask {
-		newConfig.DouyuAuth.DyDid = oldConfig.DouyuAuth.DyDid
-	}
-	// 继承原配置的文件路径
-	newConfig.File = oldConfig.File
-	// 预先将旧配置中的 LiveId 迁移到新配置（相同 URL）
-	oldMap := make(map[string]configs.LiveRoom, len(oldConfig.LiveRooms))
-	for _, room := range oldConfig.LiveRooms {
-		oldMap[room.Url] = room
-	}
-	for i := range newConfig.LiveRooms {
-		if rOld, ok := oldMap[newConfig.LiveRooms[i].Url]; ok {
-			newConfig.LiveRooms[i].LiveId = rOld.LiveId
-		}
-	}
-	// 手工编辑"设置明文"里的斗鱼 cookie，只有换了登录账号才算换掉了一份登录态：按 acf_uid 判断。
-	// 不能整串比较后一律清票据——补一个字段、删一个过期字段这类同账号微调非常常见，
-	// 顺手清掉长期凭证的结果是自动续期静默失效，用户只看到"过几天又断流"却毫无线索。
-	// 反之若真的换了账号却保留盘上的 LTP0，后台下次排期会用原账号换票并把它的 acf_* 合并回来，
-	// 表现为"我手改的 cookie 过几天自己变了回去"（静默混号）。宁可放弃自动续期，也不能悄悄换人。
-	if oldUid, newUid := douyuCookieUid(oldConfig.Cookies[dy.CookieHost]), douyuCookieUid(newConfig.Cookies[dy.CookieHost]); oldUid != newUid {
-		// cookies 整节缺失时 newUid 必然为空，那不是"换了账号"而是"没提交这一节"，不能据此作废票据。
-		if cookiesSectionEdited {
-			if newConfig.DouyuAuth.LTP0 != "" {
-				applog.GetLogger().Warnf("检测到斗鱼登录 Cookie 换了账号（acf_uid %s -> %s），已同时清除斗鱼长期凭证（需重新扫码才能启用自动续期）", oldUid, newUid)
-			}
-			newConfig.DouyuAuth = configs.DouyuAuth{}
-		}
-	}
-	// 票据因"未提交该节"而被沿用、登录 cookie 却已不在（cookies 整节被局部提交带走）时，
-	// 把排期改为"立即"：否则要空转到原排期（最长 3 天）才换回登录态，中间一直是匿名录制。
-	if newConfig.DouyuAuth.LTP0 != "" && douyuCookieUid(newConfig.Cookies[dy.CookieHost]) == "" {
-		newConfig.DouyuAuth.NextRefreshAt = 0
-	}
 	// 整体替换必须走带锁的提交路径：SetCurrentConfig 是裸写全局指针，绕开 updateMu 会把与本次
 	// 编辑同期完成的其它更新（保存 cookie、斗鱼自动续期）从内存里覆盖掉；锁外再 Marshal 更是
-	// 直接用这份基于旧快照的配置盖掉别人刚落盘的内容。UpdateWithRetry 在锁内完成替换+持久化，
-	// 并在版本冲突时重试，读到新配置的其它写者不会丢失更新。
+	// 直接用这份基于旧快照的配置盖掉别人刚落盘的内容。
+	//
+	// 但只把提交挪进锁里还不够：UpdateWithRetry 每次重试都会把"最新配置的克隆"传进 mutator，
+	// 若 mutator 依旧 *c = *基于入口快照算好的文档，重试就毫无意义（伪重试）——解析这几十毫秒里
+	// 完成的并发写入会被静默覆盖回旧值，且随本次提交一起落盘，内存与磁盘同时倒带。
+	// 实测：4000 条 cookies 的明文提交耗时约 60ms，窗口内的斗鱼续期结果 100% 被抹掉。
+	// 因此所有继承/作废判定都必须以提交时刻的最新配置为基准在闭包内重算一遍（三方合并）。
+	var prevConfig *configs.Config
 	committed, err := configs.UpdateWithRetry(func(c *configs.Config) error {
-		*c = *newConfig
+		// c 是最新配置的私有克隆：先另存一份提交前状态，供运行态房间差异比对使用
+		prevConfig = configs.CloneConfigShallow(c)
+		prevConfig.RefreshLiveRoomIndexCache()
+		applyRawConfigDoc(c, snapshot, newConfig, authSectionEdited, cookiesSectionEdited)
 		return nil
 	}, 3, 10*time.Millisecond)
 	if err != nil {
@@ -1165,7 +1123,7 @@ func putRawConfig(writer http.ResponseWriter, r *http.Request) {
 	}
 	// 先落配置再驱动运行态差异：新增房间在初始化时会按全局配置取登录 cookie，
 	// 若此时配置还是旧的，新加的房间就以匿名态建连。
-	if err := applyLiveRoomsByConfig(ctx, oldConfig, committed); err != nil {
+	if err := applyLiveRoomsByConfig(ctx, prevConfig, committed); err != nil {
 		writeJSON(writer, map[string]any{
 			"error": err.Error(),
 		})
@@ -1174,6 +1132,123 @@ func putRawConfig(writer http.ResponseWriter, r *http.Request) {
 	writeJSON(writer, commonResp{
 		Data: "OK",
 	})
+}
+
+// applyRawConfigDoc 把"设置明文"页提交的文档落到提交时刻的最新配置上（结果就地写回 latest）。
+// snapshot 是用户打开该页时的配置，仅用于判断"这一处用户到底改没改"。
+// 三方规则：文档相对快照未改动的内容一律取 latest（保住解析 YAML 这几十毫秒里完成的并发写入），
+// 改动过的取文档值（以用户这次编辑为准）。latest 由 UpdateWithRetry 在锁内传入，是本函数的唯一写入目标。
+func applyRawConfigDoc(latest, snapshot, doc *configs.Config, authSectionEdited, cookiesSectionEdited bool) {
+	// 每次重试都从原始文档重新算：mutator 可能被调用多次，不能污染 doc
+	merged := configs.CloneConfigShallow(doc)
+
+	// 明文页提交的是"整份配置"，但"文档里根本没写这一节"与"写了但留空"含义不同：前者极可能是旧前端
+	// 缓存或局部提交的客户端（它不认识斗鱼登录字段），后者才是用户显式清空。不区分的话，一次普通保存
+	// 就把不可再生的长期凭证连同续期日程静默抹掉，表现为自动续期永久失效且没有任何提示（只能重新扫码）。
+	// 实测：把 GET /raw-config 的响应体原样提交回去（YAML 里两节都缺）即可复现。
+	//
+	// 掩码是服务端自己写进文档的，不能算用户改动，所以判"改没改"要先把掩码换回快照里的原值再比。
+	docAuth := doc.DouyuAuth
+	if docAuth.LTP0 == douyuSecretMask {
+		docAuth.LTP0 = snapshot.DouyuAuth.LTP0
+	}
+	if docAuth.DyDid == douyuSecretMask {
+		docAuth.DyDid = snapshot.DouyuAuth.DyDid
+	}
+	if !authSectionEdited || docAuth == snapshot.DouyuAuth {
+		// 整节没提交、或整节照抄没改（只想改别的东西时最常见）：续期日程、失效标记这些机器字段以最新值为准，
+		// 否则一次普通保存就会把 keeper 刚写进去的 NextRefreshAt/NeedRescan/LastRenewSuccessAt 倒回入口快照。
+		merged.DouyuAuth = latest.DouyuAuth
+	} else {
+		// 用户确实编辑了这一段：文档里的掩码仍要还原成最新票据，否则"打开明文页点一次保存"
+		// 就会把掩码字符串本身当成票据存下来。真正要清除时留空 ltp0 即可。
+		if merged.DouyuAuth.LTP0 == douyuSecretMask {
+			merged.DouyuAuth.LTP0 = latest.DouyuAuth.LTP0
+		}
+		if merged.DouyuAuth.DyDid == douyuSecretMask {
+			merged.DouyuAuth.DyDid = latest.DouyuAuth.DyDid
+		}
+	}
+
+	// cookies 同理做逐主机三方合并：用户在编辑器里没动过的那条，若已被后台续期改写，取最新值。
+	// 整节缺失视为"这一节没提交"（局部客户端不认识它），不是"把所有登录 cookie 清空"。
+	if !cookiesSectionEdited {
+		merged.Cookies = cloneStrMap(latest.Cookies)
+	} else {
+		merged.Cookies = mergeCookies(snapshot.Cookies, doc.Cookies, latest.Cookies)
+	}
+
+	// OpenList 令牌由出封面阶段在每次轮换后自动回写，文档里带的还是打开页面那一刻的旧值：
+	// 用户没改过这一项就取最新值，否则一次保存把新令牌倒回去，下次上传得重新登录。
+	if doc.OpenList.Token == snapshot.OpenList.Token {
+		merged.OpenList.Token = latest.OpenList.Token
+	}
+
+	// 继承原配置的文件路径
+	merged.File = latest.File
+	// 预先将旧配置中的 LiveId 迁移到新配置（相同 URL）
+	oldMap := make(map[string]configs.LiveRoom, len(latest.LiveRooms))
+	for _, room := range latest.LiveRooms {
+		oldMap[room.Url] = room
+	}
+	for i := range merged.LiveRooms {
+		if rOld, ok := oldMap[merged.LiveRooms[i].Url]; ok {
+			merged.LiveRooms[i].LiveId = rOld.LiveId
+		}
+	}
+	// 手工编辑"设置明文"里的斗鱼 cookie，只有换了登录账号才算换掉了一份登录态：按 acf_uid 判断。
+	// 不能整串比较后一律清票据——补一个字段、删一个过期字段这类同账号微调非常常见，
+	// 顺手清掉长期凭证的结果是自动续期静默失效，用户只看到"过几天又断流"却毫无线索。
+	// 反之若真的换了账号却保留盘上的 LTP0，后台下次排期会用原账号换票并把它的 acf_* 合并回来，
+	// 表现为"我手改的 cookie 过几天自己变了回去"（静默混号）。宁可放弃自动续期，也不能悄悄换人。
+	// 比较的是三方合并后的最终登录态与当前盘上的登录态：同账号微调、或根本没提交这一节都不会触发。
+	if oldUid, newUid := douyuCookieUid(latest.Cookies[dy.CookieHost]), douyuCookieUid(merged.Cookies[dy.CookieHost]); oldUid != newUid {
+		// cookies 整节缺失时 newUid 必然为空，那不是"换了账号"而是"没提交这一节"，不能据此作废票据。
+		if cookiesSectionEdited {
+			if merged.DouyuAuth.LTP0 != "" {
+				applog.GetLogger().Warnf("检测到斗鱼登录 Cookie 换了账号（acf_uid %s -> %s），已同时清除斗鱼长期凭证（需重新扫码才能启用自动续期）", oldUid, newUid)
+			}
+			merged.DouyuAuth = configs.DouyuAuth{}
+		}
+	}
+	// 票据因"未提交该节"而被沿用、登录 cookie 却已不在（cookies 整节被局部提交带走）时，
+	// 把排期改为"立即"：否则要空转到原排期（最长 3 天）才换回登录态，中间一直是匿名录制。
+	if merged.DouyuAuth.LTP0 != "" && douyuCookieUid(merged.Cookies[dy.CookieHost]) == "" {
+		merged.DouyuAuth.NextRefreshAt = 0
+	}
+	*latest = *merged
+}
+
+// mergeCookies 逐主机三方合并 cookies：snapshot 是用户打开页面所见，doc 是提交内容，latest 是当前最新值。
+// 文档里没写这条主机时，区分"用户把它删了"（快照里有）与"提交期间别人才加上"（快照里没有），后者要保留。
+func mergeCookies(snapshot, doc, latest map[string]string) map[string]string {
+	merged := make(map[string]string, len(doc)+len(latest))
+	for host, cookie := range doc {
+		if old, ok := snapshot[host]; ok && old == cookie {
+			// 用户没动这一条：以最新值为准（斗鱼自动续期可能已经把它换掉了）
+			if cur, ok := latest[host]; ok {
+				cookie = cur
+			}
+		}
+		merged[host] = cookie
+	}
+	for host, cookie := range latest {
+		if _, inDoc := doc[host]; inDoc {
+			continue
+		}
+		if _, wasInSnapshot := snapshot[host]; !wasInSnapshot {
+			merged[host] = cookie
+		}
+	}
+	return merged
+}
+
+func cloneStrMap(src map[string]string) map[string]string {
+	cp := make(map[string]string, len(src))
+	for k, v := range src {
+		cp[k] = v
+	}
+	return cp
 }
 
 func applyLiveRoomsByConfig(ctx context.Context, oldConfig *configs.Config, newConfig *configs.Config) error {

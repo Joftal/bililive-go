@@ -93,13 +93,19 @@ func GenerateLoginQRCode(ctx context.Context) (*QRLoginSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	if gjson.GetBytes(body, "error").Int() != 0 {
+	// 斗鱼业务错误一律 HTTP 200 + error 字段；字段不存在说明这不是一个 API 响应
+	// （风控拦截页也会以 200 返回 HTML）。此处不带上正文，避免上游页面进前端错误与日志。
+	errField := gjson.GetBytes(body, "error")
+	if !errField.Exists() {
+		return nil, fmt.Errorf("斗鱼二维码接口响应不是预期 JSON（疑似风控页或接口已变更），响应长度 %d 字节", len(body))
+	}
+	if errField.Int() != 0 {
 		return nil, fmt.Errorf("斗鱼返回错误: %s", strings.TrimSpace(gjson.GetBytes(body, "data").String()))
 	}
 	code := gjson.GetBytes(body, "data.code").String()
 	qrUrl := gjson.GetBytes(body, "data.url").String()
 	if !qrCodeReg.MatchString(code) || qrUrl == "" {
-		return nil, fmt.Errorf("斗鱼二维码响应异常, body: %s", truncateForLog(body))
+		return nil, fmt.Errorf("斗鱼二维码响应异常（code/url 不完整），响应长度 %d 字节", len(body))
 	}
 	return &QRLoginSession{
 		Code:   code,
@@ -124,13 +130,18 @@ func PollLoginQRCode(ctx context.Context, code string) (*QRPollResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	errVal := gjson.GetBytes(body, "error").Int()
+	// 同 GenerateLoginQRCode：error 字段不存在说明拿到的不是 API 响应（风控页会以 200 返回 HTML），
+	// 若按"缺省即 0"继续走，就会被当成"已确认成功"去换票，最终吐出一句"斗鱼登录成功响应缺少回调 URL"。
+	errField := gjson.GetBytes(body, "error")
+	if !errField.Exists() {
+		return nil, fmt.Errorf("斗鱼扫码状态轮询响应不是预期 JSON（疑似风控页或接口已变更），响应长度 %d 字节", len(body))
+	}
 	msg := gjson.GetBytes(body, "msg").String()
-	switch errVal {
+	switch errField.Int() {
 	case 0:
 		exchangeUrl := gjson.GetBytes(body, "data.url").String()
 		if exchangeUrl == "" {
-			return nil, fmt.Errorf("斗鱼登录成功响应缺少回调 URL, body: %s", truncateForLog(body))
+			return nil, fmt.Errorf("斗鱼登录确认成功但响应缺少回调 URL（接口可能已变更），响应长度 %d 字节", len(body))
 		}
 		cookie, infoBody, trace, err := exchangeLoginCookie(ctx, exchangeUrl)
 		if err != nil {
@@ -138,6 +149,13 @@ func PollLoginQRCode(ctx context.Context, code string) (*QRPollResult, error) {
 		}
 		if cookie == "" {
 			return nil, fmt.Errorf("斗鱼登录确认成功但未获得 Set-Cookie，接口可能已变更; %s", trace)
+		}
+		// 探针确认这份 cookie 真的算登录态：斗鱼改版后跳转链也可能"收敛"到一个不下发 acf_* 的页面，
+		// 只看 cookie 非空就把残缺登录态写盘，还会顺手把下次续期排到 3 天后——面板显示已登录、实际静默不录。
+		// 只有探针给出明确的"未登录"业务码才判失败；风控页、网络抖动这类 ambiguous 异常按原样放行，
+		// 不能因为探针这一次没打通就把用户刚完成的一次真实登录作废。
+		if perr := verifyLoginCookie(ctx, cookie); perr != nil && errors.Is(perr, ErrLoginInvalid) {
+			return nil, fmt.Errorf("斗鱼登录 Cookie 未通过登录态校验，请重新扫码: %w; %s", perr, trace)
 		}
 		nickname := pickFirstString(infoBody, "nickname", "user_nickname", "uname", "data.nickname")
 		userID := pickFirstString(infoBody, "uid", "user_id", "id", "data.uid")
@@ -188,6 +206,9 @@ func doDouyuRequest(req *http.Request) ([]byte, error) {
 
 // doDouyuRequestWithCookies 与 doDouyuRequest 相同，但额外返回响应的 Set-Cookie，
 // 供扫码成功时提取 passport 域 LTP0 等长期凭证。
+// 4xx/5xx 直接判为失败：斗鱼业务错误一律 HTTP 200 + error 字段，非 2xx 是风控页/网关页，
+// 其 HTML 正文若原样返回，会被上层当成"JSON 里 error 字段缺省"继续解析，
+// 最终拼出"斗鱼登录成功响应缺少回调 URL, body: <!DOCTYPE html>…"这种既误导又外泄上游原文的错误。
 func doDouyuRequestWithCookies(req *http.Request) ([]byte, []*http.Cookie, error) {
 	resp, err := douyuHTTPClient.Do(req)
 	if err != nil {
@@ -197,6 +218,9 @@ func doDouyuRequestWithCookies(req *http.Request) ([]byte, []*http.Cookie, error
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, nil, fmt.Errorf("斗鱼登录接口返回 HTTP %d（可能被风控或接口已变更），请求 %s", resp.StatusCode, req.URL.Path)
 	}
 	return body, resp.Cookies(), nil
 }
@@ -223,6 +247,8 @@ func exchangeLoginCookie(ctx context.Context, rawUrl string) (cookie string, jso
 	var hops []string               // 跳转链诊断信息（仅记录 cookie 名，不记录值）
 	cur := rawUrl
 	var finalBody string
+	finalStatus := 0
+	converged := false // 是否走到了非跳转的终点响应；false 表示 8 跳预算用尽
 	for hop := 0; hop < 8; hop++ {
 		req, err := http.NewRequestWithContext(ctx, "GET", cur, nil)
 		if err != nil {
@@ -251,11 +277,13 @@ func exchangeLoginCookie(ctx context.Context, rawUrl string) (cookie string, jso
 		hops = append(hops, fmt.Sprintf("%s -> %d (Set-Cookie: %v)", hopURL, resp.StatusCode, names))
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 			loc, _ := resp.Location()
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
 			if loc == nil {
-				finalBody = string(body)
-				break
+				// 3xx 却不给 Location：跳转链在此断裂，后面再也拿不到任何 Set-Cookie，
+				// 把已经攒到的半截 cookie 当登录成功落盘，表现为面板显示已登录而实际录不上。
+				trace = strings.Join(hops, "; ")
+				return "", "", trace, fmt.Errorf("斗鱼登录回调返回 HTTP %d 但未给出跳转地址，登录链中断; %s", resp.StatusCode, trace)
 			}
 			if err = checkDouyuURL(loc.String()); err != nil {
 				return "", "", strings.Join(hops, "; "), err
@@ -269,11 +297,20 @@ func exchangeLoginCookie(ctx context.Context, rawUrl string) (cookie string, jso
 			return "", "", strings.Join(hops, "; "), err
 		}
 		finalBody = string(body)
+		finalStatus = resp.StatusCode
+		converged = true
 		break
 	}
-	parts := sortedCookiePairs(seen)
-	trace = strings.Join(hops, "; ") + "; 终点响应体: " + truncateForLog([]byte(finalBody))
-	return strings.Join(parts, "; "), stripJSONP(finalBody), trace, nil
+	trace = strings.Join(hops, "; ")
+	if !converged {
+		// 8 跳仍未落到终点响应：斗鱼加长或循环了跳转链。此前这里带着"半截 cookie + nil error"直接返回，
+		// 调用方只看 cookie 非空就判定登录成功，残缺登录态会连同 3 天后的续期排期一起落盘。
+		return "", "", trace, fmt.Errorf("斗鱼登录回调连续 8 跳仍未到达终点，接口可能已变更; %s", trace)
+	}
+	if finalStatus >= 400 {
+		return "", "", trace, fmt.Errorf("斗鱼登录回调终点返回 HTTP %d（风控或接口变更），未获得登录态; %s", finalStatus, trace)
+	}
+	return strings.Join(sortedCookiePairs(seen), "; "), stripJSONP(finalBody), trace, nil
 }
 
 // checkDouyuURL 只允许斗鱼官方域名，防止被诱导请求任意地址（SSRF）

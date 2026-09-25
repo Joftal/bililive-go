@@ -395,13 +395,31 @@ func TestPutRawConfigDouyuAuthSectionPresence(t *testing.T) {
 		}
 	})
 
-	t.Run("两节均未提交：票据保留，登录态缺失时排期改为立即", func(t *testing.T) {
+	t.Run("两节均未提交：票据与登录 cookie 一律照抄最新值", func(t *testing.T) {
 		mem, disk := submit(t, seed(t), "out_put_path: ./\n")
 		checkTicket(t, mem, disk, ticket)
-		// cookies 节没提交 ⇒ 登录 cookie 被默认值带走（它可由票据换回），此时必须立刻续期，
-		// 否则要空转到原排期（最长 3 天）才恢复登录录制，中间一直是匿名态。
+		// cookies 整节没提交 = 这一节没改（旧前端缓存、不认识斗鱼字段的局部客户端），
+		// 不能当成"把所有登录 cookie 清空"：票据一旦同时失效，抹掉 cookie 就只能重新扫码。
+		if got := mem.Cookies[dy.CookieHost]; got != "acf_uid=111; acf_auth=old" {
+			t.Errorf("未提交 cookies 节却改动了登录 cookie: %q", got)
+		}
+		if mem.DouyuAuth.NextRefreshAt != 1893456000 {
+			t.Errorf("未提交 cookies 节却改动了续期日程: %d", mem.DouyuAuth.NextRefreshAt)
+		}
+		if disk.DouyuAuth.NextRefreshAt != 1893456000 {
+			t.Errorf("盘上续期日程被改动: %d", disk.DouyuAuth.NextRefreshAt)
+		}
+	})
+
+	t.Run("只剩票据没有登录 cookie：排期改为立即", func(t *testing.T) {
+		// 升级后的存量状态：盘上有 LTP0 但没有登录 cookie（或只有无 acf_uid 的匿名 cookie）。
+		// 此时一次普通保存若仍按原日程排队，要空转到最长 3 天后才换回登录态，中间一直匿名录制。
+		cfg := seed(t)
+		delete(cfg.Cookies, dy.CookieHost)
+		mem, disk := submit(t, cfg, "out_put_path: ./\n")
+		checkTicket(t, mem, disk, ticket)
 		if douyuCookieUid(mem.Cookies[dy.CookieHost]) != "" {
-			t.Fatalf("用例前提不成立：cookie 并未丢失")
+			t.Fatalf("用例前提不成立：登录 cookie 并未丢失")
 		}
 		if mem.DouyuAuth.NextRefreshAt != 0 {
 			t.Errorf("登录态已丢却仍按旧日程排队: %d", mem.DouyuAuth.NextRefreshAt)

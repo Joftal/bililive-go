@@ -1131,19 +1131,17 @@ func newConfigPostProcess(c *Config) {
 	// 规范化后同一房间的不同写法（m.douyu.com/1 与 www.douyu.com/1；live_web_rid query 形态与长链）
 	// 会变成完全相同的 URL。老版本存量条目 + 升级后经 UI 正常添加的条目就会各占一行，
 	// 加载不去重则同一房间建出两个 Live、开播双录。合并策略：保留第一条，
-	// is_listening 任一为真即为真，notify_only 全部为真才为真（宁可多录，不漏录）。
+	// is_listening 任一为真即为真，notify_only 全部为真才为真（宁可多录，不漏录），
+	// 其余房间级设置按 mergeDuplicatedRoom 补齐——整条丢弃会把用户在重复条目上单独配的
+	// 原画/输出目录/转 mp4 无声抹掉，并随本次加载写回磁盘（重启也回不来）。
 	if len(c.LiveRooms) > 1 {
 		seen := make(map[string]int, len(c.LiveRooms))
 		deduped := c.LiveRooms[:0]
 		for _, room := range c.LiveRooms {
 			if idx, ok := seen[room.Url]; ok {
-				if room.IsListening {
-					deduped[idx].IsListening = true
-				}
-				if !room.NotifyOnly {
-					deduped[idx].NotifyOnly = false
-				}
-				fmt.Fprintf(os.Stderr, "[Config] 检测到规范化后重复的房间 %s，已合并到先线条目\n", room.Url)
+				adopted, conflicted := mergeDuplicatedRoom(&deduped[idx], room)
+				fmt.Fprintf(os.Stderr, "[Config] 检测到规范化后重复的房间 %s，已合并到先线条目（补齐 %s；冲突保留先条 %s）\n",
+					room.Url, joinOrNone(adopted), joinOrNone(conflicted))
 				continue
 			}
 			seen[room.Url] = len(deduped)
@@ -1159,6 +1157,71 @@ func newConfigPostProcess(c *Config) {
 	// 这里是加载侧的总闸（NewConfig / NewConfigWithBytes 都经过它，"设置明文"保存也先经后者解析），
 	// 但 Marshal 并不调用本函数，运行期往 Cookies 里写值的入口仍须各自剔除，见 DropCookieFields 调用处。
 	stripCookieFields(c.Cookies, "LTP0")
+}
+
+// mergeDuplicatedRoom 把去重时被丢弃的条目 dropped 合并进保留条目 keep，
+// 返回"从丢弃条目补齐到保留条目的字段"与"两边都设置、只能保留先条的字段"。
+//
+// 为什么必须逐字段合而不是整条丢弃：房间 URL 规范化后，同一个房间的历史写法（m.douyu.com/1）
+// 和新写法（www.douyu.com/1）会并成一条，而用户很可能把画质、输出目录、转 mp4 这类设置配在
+// 后一条上。整条丢弃会把这些值无声清零，并随本次加载一起写回磁盘，重启也回不来。
+// 口径：先线条目为准，只在它"没设置"（零值 / 指针为 nil）时用后线条目的值补齐。
+func mergeDuplicatedRoom(keep *LiveRoom, dropped LiveRoom) (adopted, conflicted []string) {
+	if dropped.IsListening {
+		keep.IsListening = true
+	}
+	if !dropped.NotifyOnly {
+		keep.NotifyOnly = false
+	}
+	// 值类型字段：零值即"这条写法没设置"
+	mergeRoomValue("quality", &keep.Quality, dropped.Quality, &adopted, &conflicted)
+	mergeRoomValue("audio_only", &keep.AudioOnly, dropped.AudioOnly, &adopted, &conflicted)
+	mergeRoomValue("nick_name", &keep.NickName, dropped.NickName, &adopted, &conflicted)
+	mergeRoomValue("scheme", &keep.SchemeUrl, dropped.SchemeUrl, &adopted, &conflicted)
+	// 房间级覆盖项全部是指针，nil 即未设置；两边都设置时只能保住先条（比指针不比内容）
+	mergeRoomPtr("interval", &keep.Interval, dropped.Interval, &adopted, &conflicted)
+	mergeRoomPtr("out_put_path", &keep.OutPutPath, dropped.OutPutPath, &adopted, &conflicted)
+	mergeRoomPtr("ffmpeg_path", &keep.FfmpegPath, dropped.FfmpegPath, &adopted, &conflicted)
+	mergeRoomPtr("log", &keep.Log, dropped.Log, &adopted, &conflicted)
+	mergeRoomPtr("feature", &keep.Feature, dropped.Feature, &adopted, &conflicted)
+	mergeRoomPtr("out_put_tmpl", &keep.OutputTmpl, dropped.OutputTmpl, &adopted, &conflicted)
+	mergeRoomPtr("video_split_strategies", &keep.VideoSplitStrategies, dropped.VideoSplitStrategies, &adopted, &conflicted)
+	mergeRoomPtr("on_record_finished", &keep.OnRecordFinished, dropped.OnRecordFinished, &adopted, &conflicted)
+	mergeRoomPtr("timeout_in_us", &keep.TimeoutInUs, dropped.TimeoutInUs, &adopted, &conflicted)
+	mergeRoomPtr("stream_preference", &keep.StreamPreference, dropped.StreamPreference, &adopted, &conflicted)
+	mergeRoomPtr("danmaku_enable", &keep.DanmakuEnable, dropped.DanmakuEnable, &adopted, &conflicted)
+	mergeRoomPtr("danmaku", &keep.Danmaku, dropped.Danmaku, &adopted, &conflicted)
+	return adopted, conflicted
+}
+
+// mergeRoomValue 保留条目该字段为未设置（零值）时采用丢弃条目的值；两边都设置且不同记为冲突。
+func mergeRoomValue[T comparable](name string, dst *T, src T, adopted, conflicted *[]string) {
+	var zero T
+	switch {
+	case *dst == zero && src != zero:
+		*dst = src
+		*adopted = append(*adopted, name)
+	case *dst != src && src != zero:
+		*conflicted = append(*conflicted, name)
+	}
+}
+
+// mergeRoomPtr 同 mergeRoomValue，用于房间级覆盖里的指针字段。
+func mergeRoomPtr[T any](name string, dst **T, src *T, adopted, conflicted *[]string) {
+	switch {
+	case *dst == nil && src != nil:
+		*dst = src
+		*adopted = append(*adopted, name)
+	case *dst != nil && src != nil && *dst != src:
+		*conflicted = append(*conflicted, name)
+	}
+}
+
+func joinOrNone(names []string) string {
+	if len(names) == 0 {
+		return "无"
+	}
+	return strings.Join(names, ",")
 }
 
 // configMinimal 是配置文件的最小子集，仅包含 launcher 决策所需的字段。
