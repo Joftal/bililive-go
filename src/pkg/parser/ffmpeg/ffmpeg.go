@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -227,32 +228,15 @@ func (p *Parser) ParseLiveStream(ctx context.Context, streamUrlInfo *live.Stream
 		}
 	}
 
-	args := []string{
-		"-nostats",
-		"-progress", "-",
-		"-y",
-	}
-
-	// 为了测试方便，本地地址不需要限速
-	// 使用代理时，FFmpeg 连接的是本地地址，不需要限速
-	if url.Hostname() != "localhost" && !useProxy {
-		args = append(args, "-re")
-	}
-
-	// 使用代理时，不需要设置 User-Agent 和 Referer（代理会处理）
-	if useProxy {
-		args = append(args,
-			"-rw_timeout", p.timeoutInUs,
-			"-i", inputURL,
-		)
-	} else {
-		args = append(args,
-			"-user_agent", ffUserAgent,
-			"-referer", referer,
-			"-rw_timeout", p.timeoutInUs,
-			"-i", inputURL,
-		)
-	}
+	args := buildInputArgs(inputArgs{
+		timeoutInUs: p.timeoutInUs,
+		inputURL:    inputURL,
+		headers:     headers,
+		userAgent:   ffUserAgent,
+		referer:     referer,
+		useProxy:    useProxy,
+		rateLimit:   url.Hostname() != "localhost" && !useProxy,
+	})
 
 	// 只录音频模式：添加 -vn 参数忽略视频流
 	if p.audioOnly {
@@ -261,16 +245,6 @@ func (p *Parser) ParseLiveStream(ctx context.Context, streamUrlInfo *live.Stream
 	}
 
 	args = append(args, "-c", "copy")
-
-	// 不使用代理时，添加额外的请求头
-	if !useProxy {
-		for k, v := range headers {
-			if k == "User-Agent" || k == "Referer" {
-				continue
-			}
-			args = append(args, "-headers", k+": "+v)
-		}
-	}
 
 	cfg := configs.GetCurrentConfig()
 	var maxFileSize int64
@@ -334,6 +308,81 @@ func (p *Parser) ParseLiveStream(ctx context.Context, streamUrlInfo *live.Stream
 		return err
 	}
 	return nil
+}
+
+// inputArgs 是 ParseLiveStream 组装"输入侧"参数（-i 及其之前的所有选项）所需的输入
+type inputArgs struct {
+	timeoutInUs string
+	inputURL    string
+	headers     map[string]string
+	userAgent   string
+	referer     string
+	useProxy    bool
+	rateLimit   bool
+}
+
+// buildInputArgs 组装 FFmpeg 的输入侧参数。
+//
+// 关键约束：所有请求头相关选项必须出现在 -i 之前。FFmpeg 中位于输入文件之后的选项属于
+// "输出文件"，放在 -i 之后会被静默丢弃（实测：服务端只收到 -user_agent/-referer，收不到 Cookie），
+// 这会让斗鱼登录 cookie 等"带登录态取流"的能力形同不存在。
+func buildInputArgs(a inputArgs) []string {
+	args := []string{
+		"-nostats",
+		"-progress", "-",
+		"-y",
+	}
+
+	// 为了测试方便，本地地址不需要限速
+	// 使用代理时，FFmpeg 连接的是本地地址，不需要限速
+	if a.rateLimit {
+		args = append(args, "-re")
+	}
+
+	// 使用代理时，不需要设置 User-Agent 和 Referer（代理会处理）
+	if a.useProxy {
+		return append(args,
+			"-rw_timeout", a.timeoutInUs,
+			"-i", a.inputURL,
+		)
+	}
+	args = append(args,
+		"-user_agent", a.userAgent,
+		"-referer", a.referer,
+	)
+	if extraHeaders := buildExtraHeaders(a.headers); extraHeaders != "" {
+		args = append(args, "-headers", extraHeaders)
+	}
+	return append(args,
+		"-rw_timeout", a.timeoutInUs,
+		"-i", a.inputURL,
+	)
+}
+
+// buildExtraHeaders 把除 User-Agent/Referer 外的请求头合并成 ffmpeg `-headers` 需要的单个字符串
+// （各头之间用 \r\n 分隔，与浏览器/HTTP 报文一致）。
+// 必须合并而不是逐个传 `-headers`：ffmpeg 的 -headers 是"整体赋值"型选项，传两次就只剩最后一个，
+// 实测同时传 Cookie 与自定义头时 Cookie 会被覆盖掉。按 key 排序保证参数序列稳定、可测。
+func buildExtraHeaders(headers map[string]string) string {
+	keys := make([]string, 0, len(headers))
+	for k := range headers {
+		if k == "User-Agent" || k == "Referer" {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if headers[k] == "" {
+			continue
+		}
+		parts = append(parts, k+": "+headers[k])
+	}
+	return strings.Join(parts, "\r\n")
 }
 
 // isFlvStream 判断 URL 是否指向 FLV 流
