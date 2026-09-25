@@ -136,6 +136,9 @@ func (m *manager) registryListener(ctx context.Context, ed events.Dispatcher) {
 	})
 	ed.AddEventListener(listeners.LiveEnd, removeEvtListener)
 	ed.AddEventListener(listeners.ListenStop, removeEvtListener)
+	// RecorderStopRequested 仅表示 recorder 自身遇到不可重试错误，需要被回收；
+	// 它不具有 LiveEnd 的全局直播状态语义，避免错误结束仍在进行的直播会话。
+	ed.AddEventListener(RecorderStopRequested, removeEvtListener)
 }
 
 func (m *manager) Start(ctx context.Context) error {

@@ -187,7 +187,13 @@ func getLive(writer http.ResponseWriter, r *http.Request) {
 	}
 
 	// 获取平台等待状态信息
-	waitInfo := ratelimit.GetGlobalRateLimiter().GetPlatformWaitInfo(platformKey)
+	platformRateLimiter := ratelimit.GetGlobalRateLimiter()
+	platformRateLimitEnabled := platformRateLimiter.Enabled()
+	waitInfo := platformRateLimiter.GetPlatformWaitInfo(platformKey)
+	platformRateLimit := 0
+	if platformRateLimitEnabled {
+		platformRateLimit = cfg.GetPlatformMinAccessInterval(platformKey)
+	}
 
 	// 获取调度器状态信息
 	var schedulerStatus *live.SchedulerStatus
@@ -252,10 +258,12 @@ func getLive(writer http.ResponseWriter, r *http.Request) {
 		"audio_only":            room.AudioOnly,
 
 		// 平台访问限制
-		"platform_rate_limit": cfg.GetPlatformMinAccessInterval(platformKey),
+		"platform_rate_limit":         platformRateLimit,
+		"platform_rate_limit_enabled": platformRateLimitEnabled,
 
 		// 平台等待状态
 		"rate_limit_info": map[string]interface{}{
+			"enabled":             platformRateLimitEnabled,
 			"waited_seconds":      waitInfo.WaitedSeconds,
 			"next_request_in_sec": waitInfo.NextRequestInSec,
 			"min_interval_sec":    waitInfo.MinIntervalSec,
@@ -471,7 +479,8 @@ func parseLiveAction(writer http.ResponseWriter, r *http.Request) {
 	case "forceRefresh":
 		// 强制刷新：忽略平台访问频率限制，立即获取最新信息
 		platformKey := configs.GetPlatformKeyFromUrl(live.GetRawUrl())
-		ratelimit.GetGlobalRateLimiter().ForceAccess(platformKey)
+		platformRateLimiter := ratelimit.GetGlobalRateLimiter()
+		platformRateLimiter.ForceAccess(platformKey)
 
 		// 手动调用 GetInfo 获取最新信息
 		info, err := live.GetInfo()
@@ -483,8 +492,9 @@ func parseLiveAction(writer http.ResponseWriter, r *http.Request) {
 		}
 
 		// 广播频率限制更新事件，通知前端更新倒计时
-		waitInfo := ratelimit.GetGlobalRateLimiter().GetPlatformWaitInfo(platformKey)
+		waitInfo := platformRateLimiter.GetPlatformWaitInfo(platformKey)
 		GetSSEHub().BroadcastRateLimitUpdate(live.GetLiveId(), map[string]interface{}{
+			"enabled":             platformRateLimiter.Enabled(),
 			"waited_seconds":      waitInfo.WaitedSeconds,
 			"next_request_in_sec": waitInfo.NextRequestInSec,
 			"min_interval_sec":    waitInfo.MinIntervalSec,
@@ -983,8 +993,9 @@ func getConfig(writer http.ResponseWriter, r *http.Request) {
 }
 
 func putConfig(writer http.ResponseWriter, r *http.Request) {
+	// 直接序列化当前快照即可；索引缓存不参与序列化，且共享快照不可变，
+	// 不能在此调用 RefreshLiveRoomIndexCache 写它的 map。
 	config := configs.GetCurrentConfig()
-	config.RefreshLiveRoomIndexCache()
 	if err := config.Marshal(); err != nil {
 		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{
 			ErrNo:  http.StatusBadRequest,
@@ -1081,8 +1092,10 @@ func putRawConfig(writer http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// 在副本上刷新索引：直接用全局配置指针的话，RefreshLiveRoomIndexCache 会就地改写一份
-	// 正被所有并发请求读取的配置（data race）。
+	// 在副本上刷新索引：配置是不可变快照，直接在 GetCurrentConfig() 返回的共享对象上
+	// 调 RefreshLiveRoomIndexCache 会就地改写一份正被所有并发请求读取的 map
+	// （Go 运行时 fatal error: concurrent map read and map write）。
+	// CloneConfigShallow 会连 liveRoomIndexCache 一起换新 map，所以在副本上刷新是安全的。
 	oldConfig := configs.CloneConfigShallow(curConfig)
 	oldConfig.RefreshLiveRoomIndexCache()
 	// 明文页提交的是"整份配置"，但"文档里根本没写这一节"与"写了但留空"含义不同：前者极可能是旧前端
@@ -1329,6 +1342,7 @@ func getPlatformStats(writer http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	platformRateLimitEnabled := ratelimit.GetGlobalRateLimiter().Enabled()
 
 	// 统计每个平台的直播间（只统计正在监控的）
 	platformRooms := make(map[string][]map[string]interface{})
@@ -1411,7 +1425,7 @@ func getPlatformStats(writer http.ResponseWriter, r *http.Request) {
 
 		// 检查是否低于最小访问间隔
 		warningMessage := ""
-		if listeningCount > 0 && platformConfig.MinAccessIntervalSec > 0 && actualAccessInterval < float64(platformConfig.MinAccessIntervalSec) {
+		if platformRateLimitEnabled && listeningCount > 0 && platformConfig.MinAccessIntervalSec > 0 && actualAccessInterval < float64(platformConfig.MinAccessIntervalSec) {
 			effectiveInterval := float64(platformConfig.MinAccessIntervalSec) * float64(listeningCount)
 			warningMessage = fmt.Sprintf("当前设置下实际每个直播间的检测间隔约为 %.1f 秒（受最小访问间隔限制）", effectiveInterval)
 		}
@@ -1491,9 +1505,10 @@ func getPlatformStats(writer http.ResponseWriter, r *http.Request) {
 	}
 
 	response := map[string]interface{}{
-		"platforms":           stats,
-		"available_platforms": availablePlatforms,
-		"global_interval":     cfg.Interval,
+		"platforms":                   stats,
+		"available_platforms":         availablePlatforms,
+		"global_interval":             cfg.Interval,
+		"platform_rate_limit_enabled": platformRateLimitEnabled,
 	}
 
 	writeJSON(writer, response)

@@ -17,6 +17,7 @@ import (
 	"github.com/bililive-go/bililive-go/src/notify"
 	"github.com/bililive-go/bililive-go/src/pipeline"
 	"github.com/bililive-go/bililive-go/src/pkg/events"
+	eventsmock "github.com/bililive-go/bililive-go/src/pkg/events/mock"
 	"github.com/bililive-go/bililive-go/src/pkg/livelogger"
 	"github.com/bililive-go/bililive-go/src/types"
 )
@@ -39,16 +40,20 @@ func TestTryRecordStopsWithoutPanicWhenFilenameRenderFails(t *testing.T) {
 	l.EXPECT().GetStreamInfos().Return([]*live.StreamUrlInfo{{Url: streamURL}}, nil)
 	l.EXPECT().GetLogger().Return(logger)
 
+	// 渲染失败时 recorder 应请求 manager 仅回收自身，而不是错误派发 LiveEnd。
+	ed := eventsmock.NewMockDispatcher(ctrl)
+	ed.EXPECT().DispatchEvent(events.NewEvent(RecorderStopRequested, l))
+
 	cache := gcache.New(1).LRU().Build()
 	if err := cache.Set(l, &live.Info{Live: l}); err != nil {
 		t.Fatalf("写入直播信息缓存失败: %v", err)
 	}
-	r := &recorder{Live: l, cache: cache}
+	r := &recorder{Live: l, cache: cache, ed: ed}
 
 	r.tryRecord(context.Background())
 
 	logs := logger.GetLogs()
-	if !strings.Contains(logs, "failed to render filename, recording aborted") {
+	if !strings.Contains(logs, "failed to render filename, stopping recorder") {
 		t.Fatalf("未记录文件名渲染失败日志: %s", logs)
 	}
 	if !strings.Contains(logs, "render failed") {
@@ -81,7 +86,7 @@ func newTestRecorder(t *testing.T, liveId types.LiveID) *recorder {
 
 func TestResolveState_NoRedirect(t *testing.T) {
 	state := &pipelineSharedState{
-		sourceNames: make(map[string]bool),
+		sourceNames:  make(map[string]bool),
 		pendingCount: 5,
 	}
 

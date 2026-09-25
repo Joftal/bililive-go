@@ -11,6 +11,7 @@ import (
 type PlatformRateLimiter struct {
 	limiters map[string]*PlatformLimiter // 平台名称 -> 限制器
 	mu       sync.RWMutex                // 读写锁保护map
+	enabled  bool                        // 是否实际应用平台级访问限制
 }
 
 // PlatformLimiter 单个平台的频率限制器
@@ -21,8 +22,17 @@ type PlatformLimiter struct {
 	inFlight    chan struct{} // 限制同一平台最多一个请求在途
 }
 
-var globalRateLimiter = &PlatformRateLimiter{
-	limiters: make(map[string]*PlatformLimiter),
+// 平台级访问限制暂时关闭，以避免同平台请求串行排队导致新直播间长时间无法开始录制。
+// 保留限制器实现和配置结构，后续改善调度策略后可重新启用。
+const globalRateLimitEnabled = false
+
+var globalRateLimiter = newPlatformRateLimiter(globalRateLimitEnabled)
+
+func newPlatformRateLimiter(enabled bool) *PlatformRateLimiter {
+	return &PlatformRateLimiter{
+		limiters: make(map[string]*PlatformLimiter),
+		enabled:  enabled,
+	}
 }
 
 // GetGlobalRateLimiter 获取全局速率限制器实例
@@ -30,8 +40,17 @@ func GetGlobalRateLimiter() *PlatformRateLimiter {
 	return globalRateLimiter
 }
 
+// Enabled 返回当前限制器是否实际应用平台级访问限制。
+func (prl *PlatformRateLimiter) Enabled() bool {
+	return prl.enabled
+}
+
 // SetPlatformLimit 设置或更新指定平台的访问频率限制
 func (prl *PlatformRateLimiter) SetPlatformLimit(platform string, intervalSec int) {
+	if !prl.enabled {
+		return
+	}
+
 	if intervalSec <= 0 {
 		// 如果间隔为0或负数，移除该平台的限制
 		prl.mu.Lock()
@@ -63,7 +82,7 @@ func (prl *PlatformRateLimiter) SetPlatformLimit(platform string, intervalSec in
 // EnsurePlatformLimit 在平台尚无限制时设置默认值，不覆盖已经显式配置的间隔。
 // 用于房间对象早于配置持久化创建的路径，保证首次请求也不会绕过平台保护。
 func (prl *PlatformRateLimiter) EnsurePlatformLimit(platform string, intervalSec int) {
-	if platform == "" || intervalSec <= 0 {
+	if !prl.enabled || platform == "" || intervalSec <= 0 {
 		return
 	}
 
@@ -90,6 +109,14 @@ func (prl *PlatformRateLimiter) WaitForPlatform(platform string) {
 // 如果平台没有设置限制，立即返回 true
 // 返回 true 表示成功获取访问权限，false 表示被 context 取消
 func (prl *PlatformRateLimiter) WaitForPlatformWithContext(ctx context.Context, platform string) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+
+	if !prl.enabled {
+		return true
+	}
+
 	prl.mu.RLock()
 	limiter, exists := prl.limiters[platform]
 	prl.mu.RUnlock()
@@ -108,6 +135,14 @@ func (prl *PlatformRateLimiter) WaitForPlatformWithContext(ctx context.Context, 
 // 仅限制请求开始间隔不足以保护启动阶段：当前一个请求耗时超过最小间隔时，后续请求仍会
 // 重叠执行。这里把并发槽位与开始间隔合并为一次许可，使大量直播间并发初始化时仍按平台串行。
 func (prl *PlatformRateLimiter) AcquirePlatformWithContext(ctx context.Context, platform string) (release func(), ok bool) {
+	if ctx.Err() != nil {
+		return nil, false
+	}
+
+	if !prl.enabled {
+		return func() {}, true
+	}
+
 	prl.mu.RLock()
 	limiter, exists := prl.limiters[platform]
 	prl.mu.RUnlock()
@@ -172,6 +207,10 @@ func waitForLimiterWithContext(ctx context.Context, limiter *PlatformLimiter) bo
 
 // GetPlatformNextAllowedTime 获取平台下次允许访问的时间
 func (prl *PlatformRateLimiter) GetPlatformNextAllowedTime(platform string) time.Time {
+	if !prl.enabled {
+		return time.Now()
+	}
+
 	prl.mu.RLock()
 	limiter, exists := prl.limiters[platform]
 	prl.mu.RUnlock()
@@ -197,6 +236,10 @@ func (prl *PlatformRateLimiter) RemovePlatformLimit(platform string) {
 
 // GetAllPlatformLimits 获取所有平台的当前限制设置
 func (prl *PlatformRateLimiter) GetAllPlatformLimits() map[string]int {
+	if !prl.enabled {
+		return map[string]int{}
+	}
+
 	prl.mu.RLock()
 	defer prl.mu.RUnlock()
 
@@ -219,6 +262,10 @@ type WaitInfo struct {
 
 // GetPlatformWaitInfo 获取指定平台的等待状态信息
 func (prl *PlatformRateLimiter) GetPlatformWaitInfo(platform string) WaitInfo {
+	if !prl.enabled {
+		return WaitInfo{}
+	}
+
 	prl.mu.RLock()
 	limiter, exists := prl.limiters[platform]
 	prl.mu.RUnlock()
@@ -254,6 +301,10 @@ func (prl *PlatformRateLimiter) GetPlatformWaitInfo(platform string) WaitInfo {
 // ForceAccess 强制访问平台，忽略频率限制
 // 返回距离上次访问的时间间隔
 func (prl *PlatformRateLimiter) ForceAccess(platform string) time.Duration {
+	if !prl.enabled {
+		return 0
+	}
+
 	prl.mu.RLock()
 	limiter, exists := prl.limiters[platform]
 	prl.mu.RUnlock()

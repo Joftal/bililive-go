@@ -7,7 +7,7 @@ import (
 )
 
 func TestPlatformRateLimiter(t *testing.T) {
-	limiter := GetGlobalRateLimiter()
+	limiter := newPlatformRateLimiter(true)
 
 	// 设置测试平台限制：2秒间隔
 	limiter.SetPlatformLimit("test_platform", 2)
@@ -44,7 +44,7 @@ func TestPlatformRateLimiter(t *testing.T) {
 }
 
 func TestPlatformRateLimiterUpdate(t *testing.T) {
-	limiter := GetGlobalRateLimiter()
+	limiter := newPlatformRateLimiter(true)
 
 	// 设置初始限制
 	limiter.SetPlatformLimit("update_test", 3)
@@ -80,6 +80,7 @@ func TestAcquirePlatformSerializesInFlightRequests(t *testing.T) {
 				inFlight: make(chan struct{}, 1),
 			},
 		},
+		enabled: true,
 	}
 
 	releaseFirst, ok := limiter.AcquirePlatformWithContext(context.Background(), "test")
@@ -112,11 +113,43 @@ func TestAcquirePlatformSerializesInFlightRequests(t *testing.T) {
 }
 
 func TestEnsurePlatformLimitDoesNotOverrideExplicitLimit(t *testing.T) {
-	limiter := &PlatformRateLimiter{limiters: make(map[string]*PlatformLimiter)}
+	limiter := newPlatformRateLimiter(true)
 	limiter.SetPlatformLimit("test", 5)
 	limiter.EnsurePlatformLimit("test", 1)
 
 	if got := limiter.GetAllPlatformLimits()["test"]; got != 5 {
 		t.Fatalf("兜底限制覆盖了显式配置：得到 %d 秒，期望 5 秒", got)
+	}
+}
+
+func TestGlobalPlatformRateLimiterDisabled(t *testing.T) {
+	limiter := GetGlobalRateLimiter()
+	limiter.SetPlatformLimit("test", 60)
+	if limiter.Enabled() {
+		t.Fatal("全局平台限制器应保持关闭")
+	}
+
+	if limits := limiter.GetAllPlatformLimits(); len(limits) != 0 {
+		t.Fatalf("全局平台限制器应保持关闭，实际限制：%v", limits)
+	}
+
+	release, ok := limiter.AcquirePlatformWithContext(context.Background(), "test")
+	if !ok {
+		t.Fatal("关闭平台限制后请求应立即获准")
+	}
+	release()
+
+	waitInfo := limiter.GetPlatformWaitInfo("test")
+	if waitInfo.MinIntervalSec != 0 || waitInfo.NextRequestInSec != 0 {
+		t.Fatalf("关闭平台限制后不应报告等待状态：%+v", waitInfo)
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if limiter.WaitForPlatformWithContext(canceledCtx, "test") {
+		t.Fatal("关闭平台限制后仍应尊重 context 取消")
+	}
+	if release, acquired := limiter.AcquirePlatformWithContext(canceledCtx, "test"); acquired || release != nil {
+		t.Fatal("context 已取消时不应获取平台许可")
 	}
 }

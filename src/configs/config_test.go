@@ -2,6 +2,7 @@ package configs
 
 import (
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/bililive-go/bililive-go/src/pkg/ratelimit"
@@ -97,7 +98,7 @@ func TestGetPlatformMinAccessInterval(t *testing.T) {
 	assert.Equal(t, 1, interval) // 默认最小间隔为 1 秒，防止无限制高频访问
 }
 
-func TestDefaultPlatformRateLimitSurvivesTransientConfigUpdate(t *testing.T) {
+func TestPlatformRateLimitRemainsDisabledAfterConfigUpdate(t *testing.T) {
 	const roomURL = "https://live.douyin.com/123456"
 	limiter := ratelimit.GetGlobalRateLimiter()
 	t.Cleanup(func() {
@@ -109,16 +110,50 @@ func TestDefaultPlatformRateLimitSurvivesTransientConfigUpdate(t *testing.T) {
 	cfg.RefreshLiveRoomIndexCache()
 	SetCurrentConfig(cfg)
 
-	if got := limiter.GetAllPlatformLimits()[PlatformKeyDouyin]; got != 1 {
-		t.Fatalf("初始默认平台限流 = %d 秒，期望 1 秒", got)
+	if limits := limiter.GetAllPlatformLimits(); len(limits) != 0 {
+		t.Fatalf("配置加载后平台限流应保持关闭，实际限制：%v", limits)
 	}
 
 	if _, err := SetLiveRoomId(roomURL, types.LiveID("douyin-test")); err != nil {
 		t.Fatalf("写入临时 LiveId 失败: %v", err)
 	}
-	if got := limiter.GetAllPlatformLimits()[PlatformKeyDouyin]; got != 1 {
-		t.Fatalf("临时配置更新后的默认平台限流 = %d 秒，期望仍为 1 秒", got)
+	if limits := limiter.GetAllPlatformLimits(); len(limits) != 0 {
+		t.Fatalf("临时配置更新后平台限流应保持关闭，实际限制：%v", limits)
 	}
+}
+
+// TestGetLiveRoomByUrlConcurrent 保证在共享的不可变配置快照上并发查询房间时不会
+// 触发 Go 运行时的 "concurrent map read and map write" fatal error。
+// 回归此前的 bug：GetLiveRoomByUrl 在缓存未命中时会调用 RefreshLiveRoomIndexCache
+// 写入共享快照的 map，与其它 goroutine 的读并发时导致崩溃。
+// 使用 -race 运行可进一步检测数据竞争。
+func TestGetLiveRoomByUrlConcurrent(t *testing.T) {
+	cfg := NewConfig()
+	cfg.LiveRooms = []LiveRoom{
+		{Url: "https://live.bilibili.com/1", IsListening: true},
+		{Url: "https://live.bilibili.com/2", IsListening: true},
+	}
+	cfg.RefreshLiveRoomIndexCache()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 500; j++ {
+				// 交替命中缓存与未命中（触发原先的写-回退路径）。
+				if (i+j)%2 == 0 {
+					room, err := cfg.GetLiveRoomByUrl("https://live.bilibili.com/1")
+					assert.NoError(t, err)
+					assert.Equal(t, "https://live.bilibili.com/1", room.Url)
+				} else {
+					_, err := cfg.GetLiveRoomByUrl("https://live.bilibili.com/does-not-exist")
+					assert.Error(t, err)
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
 }
 
 func TestBackwardsCompatibility(t *testing.T) {

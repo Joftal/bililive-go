@@ -12,6 +12,7 @@ import (
 	"github.com/bililive-go/bililive-go/src/instance"
 	"github.com/bililive-go/bililive-go/src/live"
 	livemock "github.com/bililive-go/bililive-go/src/live/mock"
+	"github.com/bililive-go/bililive-go/src/pkg/events"
 	"github.com/bililive-go/bililive-go/src/pkg/livelogger"
 	"github.com/bililive-go/bililive-go/src/types"
 )
@@ -54,6 +55,27 @@ func TestManagerAddAndRemoveRecorder(t *testing.T) {
 	_, err = m.GetRecorder(context.Background(), "test")
 	assert.Equal(t, ErrRecorderNotExist, err)
 	assert.False(t, m.HasRecorder(context.Background(), "test"))
+}
+
+// TestRecorderStopRequestedRemovesOnlyRecorder 验证 recorder 的内部停止请求会被
+// manager 消费并回收 recorder，无需伪造具有全局直播状态语义的 LiveEnd。
+func TestRecorderStopRequestedRemovesOnlyRecorder(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ctx := context.Background()
+	ed := events.NewDispatcher(ctx)
+	l := livemock.NewMockLive(ctrl)
+	l.EXPECT().GetLiveId().Return(types.LiveID("test")).AnyTimes()
+
+	r := NewMockRecorder(ctrl)
+	r.EXPECT().Close()
+	m := &manager{savers: map[types.LiveID]Recorder{"test": r}}
+	m.registryListener(ctx, ed)
+
+	ed.DispatchEventSync(events.NewEvent(RecorderStopRequested, l))
+
+	assert.False(t, m.HasRecorder(ctx, "test"))
 }
 
 // TestRestartRecorderRaceWithLiveEnd 验证 RestartRecorder 和 LiveEnd（RemoveRecorder）

@@ -1243,27 +1243,21 @@ func (c *Config) RefreshLiveRoomIndexCache() {
 	}
 }
 
-func (c *Config) RemoveLiveRoomByUrl(url string) error {
-	c.RefreshLiveRoomIndexCache()
-	if index, ok := c.liveRoomIndexCache[url]; ok {
-		if index >= 0 && index < len(c.LiveRooms) && c.LiveRooms[index].Url == url {
-			c.LiveRooms = append(c.LiveRooms[:index], c.LiveRooms[index+1:]...)
-			delete(c.liveRoomIndexCache, url)
-			return nil
-		}
-	}
-	return errors.New("failed removing room: " + url)
-}
-
 func (c *Config) GetLiveRoomByUrl(url string) (*LiveRoom, error) {
-	room, err := c.getLiveRoomByUrlImpl(url)
-	if err != nil {
-		c.RefreshLiveRoomIndexCache()
-		if room, err = c.getLiveRoomByUrlImpl(url); err != nil {
-			return nil, err
+	// 配置快照是不可变的：所有写操作都走 Update 的“复制-修改-原子替换”路径，
+	// 并在替换前调用 RefreshLiveRoomIndexCache 维护索引缓存。因此这里只做只读查找，
+	// 绝不在共享快照上写 map/切片，否则会与其它 goroutine 的读发生并发读写，
+	// 触发 Go 运行时的 fatal error（concurrent map read and map write）。
+	if room, err := c.getLiveRoomByUrlImpl(url); err == nil {
+		return room, nil
+	}
+	// 索引缓存未命中时回退到只读线性扫描，作为兜底（例如未经 Refresh 的手工构造配置）。
+	for i := range c.LiveRooms {
+		if c.LiveRooms[i].Url == url {
+			return &c.LiveRooms[i], nil
 		}
 	}
-	return room, nil
+	return nil, errors.New("room " + url + " doesn't exist.")
 }
 
 func (c Config) getLiveRoomByUrlImpl(url string) (*LiveRoom, error) {

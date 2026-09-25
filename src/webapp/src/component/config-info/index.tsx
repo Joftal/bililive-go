@@ -183,6 +183,7 @@ interface PlatformStatsResponse {
   platforms: PlatformStat[];
   available_platforms: string[];
   global_interval: number;
+  platform_rate_limit_enabled?: boolean;
 }
 
 // 实际生效值显示组件
@@ -1082,6 +1083,7 @@ const PlatformSettings: React.FC<{
   }
 
   const { platforms, available_platforms, global_interval } = platformStats;
+  const platformRateLimitEnabled = platformStats.platform_rate_limit_enabled ?? true;
 
   // 分组平台：有直播间的 vs 只有配置没有直播间的
   const platformsWithRooms = platforms.filter(p => p.has_rooms);
@@ -1186,6 +1188,7 @@ const PlatformSettings: React.FC<{
             platform={platform}
             globalConfig={globalConfig}
             globalInterval={global_interval}
+            platformRateLimitEnabled={platformRateLimitEnabled}
             onSave={(values) => handleSave(platform.platform_key, values)}
             onDelete={() => handleDelete(platform.platform_key)}
             loading={loading}
@@ -1208,6 +1211,15 @@ const PlatformSettings: React.FC<{
         showIcon
         style={{ marginBottom: 16 }}
       />
+      {!platformRateLimitEnabled && (
+        <Alert
+          message="平台级访问限流已暂时停用"
+          description="min_access_interval_sec 配置会被保留，但当前不会限制请求间隔或同平台并发。后续调度策略改善后再恢复生效。"
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+        />
+      )}
 
       {/* 正在监控的平台 */}
       {platformsWithRooms.length > 0 && (
@@ -1257,11 +1269,12 @@ const PlatformConfigForm: React.FC<{
   platform: PlatformStat;
   globalConfig: EffectiveConfig;
   globalInterval: number;
+  platformRateLimitEnabled: boolean;
   onSave: (values: any) => void;
   onDelete: () => void;
   loading: boolean;
   onNavigateToRoom: (liveId: string) => void;
-}> = ({ platform, globalConfig, globalInterval, onSave, onDelete, loading, onNavigateToRoom }) => {
+}> = ({ platform, globalConfig, globalInterval, platformRateLimitEnabled, onSave, onDelete, loading, onNavigateToRoom }) => {
   const [form] = Form.useForm();
 
   useEffect(() => {
@@ -1341,18 +1354,31 @@ const PlatformConfigForm: React.FC<{
         </ConfigField>
 
         <ConfigField
-          label="最小访问间隔 (秒)"
-          description="该平台 API 的最小访问间隔，用于防风控。若监控数量过多导致频率过快，系统会自动增加检测间隔。"
+          label={`最小访问间隔 (秒${platformRateLimitEnabled ? '' : '，暂未启用'})`}
+          description={platformRateLimitEnabled
+            ? '该平台 API 的最小访问间隔，用于防风控。若监控数量过多导致频率过快，系统会自动增加检测间隔。'
+            : '配置值会继续保留，但平台级访问限流关闭期间不会生效。'}
           id={`platforms-${platformKey}-min_access_interval_sec`}
-          inheritance={{
+          inheritance={platformRateLimitEnabled ? {
             source: 'default',
             isOverridden: (platform.min_access_interval_sec || 0) > 0,
             inheritedValue: '不限制 (0)',
-          }}
-          valueDisplay={(platform.min_access_interval_sec || 0) > 0 ? platform.min_access_interval_sec : '不限制 (0)'}
+          } : undefined}
+          effectiveValue={platformRateLimitEnabled ? undefined : '当前不生效'}
+          valueDisplay={!platformRateLimitEnabled
+            ? ((platform.min_access_interval_sec || 0) > 0
+              ? `已配置 ${platform.min_access_interval_sec} 秒（暂不生效）`
+              : '暂未启用')
+            : ((platform.min_access_interval_sec || 0) > 0 ? platform.min_access_interval_sec : '不限制 (0)')}
         >
           <Form.Item name="min_access_interval_sec" rules={[{ type: 'number', min: 0, message: '不能为负数' }]}>
-            <InputNumber min={0} max={3600} style={{ width: 200 }} placeholder="0 (不限制)" />
+            <InputNumber
+              min={0}
+              max={3600}
+              style={{ width: 200 }}
+              placeholder="0 (不限制)"
+              disabled={!platformRateLimitEnabled}
+            />
           </Form.Item>
         </ConfigField>
 
