@@ -69,9 +69,12 @@ func (p *Proxy) Start(ctx context.Context) error {
 	mux.HandleFunc("/media", p.handleMedia)
 
 	p.server = &http.Server{
-		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 0,
+		Handler: mux,
+		// 只能限"读请求头"这一段，绝不能设 ReadTimeout：Go 会把它同时用作 keep-alive
+		// 连接的空闲上限，空闲超过该值就由服务端强制关闭，而 ffmpeg 的 HLS demuxer 正是
+		// 复用同一条连接轮询播放列表，届时录制侧只报 "Error number -10053 occurred"。
+		// 上游资源的超时由 p.client 负责，本地回环无需整体读超时；分段是流式透传，写超时也要留空。
+		ReadHeaderTimeout: 30 * time.Second,
 	}
 
 	bilisentry.GoWithContext(ctx, func(ctx context.Context) {
